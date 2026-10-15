@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # Add `cache: pnpm` once pnpm-lock.yaml is committed.
+      - run: pnpm install
+      - run: pnpm typecheck
+      - name: Tests (including RLS tests on a throwaway Postgres 16 cluster)
+        env:
+          PG_BIN: /usr/lib/postgresql/16/bin
+        run: |
+          test -x "$PG_BIN/initdb" || (sudo apt-get update && sudo apt-get install -y postgresql-16)
+          pnpm test
