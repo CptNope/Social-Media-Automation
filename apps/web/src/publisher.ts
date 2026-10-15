@@ -10,8 +10,12 @@ import {
   inAnonymous,
   inTenant,
   listApprovals,
+  findExpiringTokens,
   lockContentItem,
+  lockIntegration,
   lockPublication,
+  setTokenExpiry,
+  updateCredential,
   markIntegrationChecked,
   readCredential,
   setContentState,
@@ -22,8 +26,8 @@ import {
   type IntegrationRow,
   type QueryClient,
 } from "@jat/db";
-import { PublishError, WordPressClient, type BlueskyCredential, type ChannelAdapter, type FacebookPageCredential, type PublishablePost, type WordPressCredential } from "@jat/integrations";
-import { decryptSecret, type KekProvider } from "@jat/vault";
+import { PublishError, WordPressClient, type ChannelAdapter, type PublishablePost, type WordPressCredential } from "@jat/integrations";
+import { decryptSecret, encryptSecret, type KekProvider } from "@jat/vault";
 import { carriedAiFindings, lintForBrand, loadBrandContext } from "./content-jobs.ts";
 
 /**
@@ -42,7 +46,7 @@ import { carriedAiFindings, lintForBrand, loadBrandContext } from "./content-job
  * have posted ("ambiguous") stops and asks a person to check.
  */
 
-export const PUBLISHABLE_CHANNELS = ["facebook", "bluesky"] as const;
+export const PUBLISHABLE_CHANNELS = ["facebook", "bluesky", "linkedin", "threads", "x", "google_business_profile"] as const;
 export type PublishableChannel = (typeof PUBLISHABLE_CHANNELS)[number];
 export const isPublishableChannel = (c: string): c is PublishableChannel => (PUBLISHABLE_CHANNELS as readonly string[]).includes(c);
 
@@ -58,12 +62,12 @@ export interface PublisherDeps {
   publisherDb: Database;
   /** KEKs by id, for decrypting credentials. */
   keks: KekProvider | ReadonlyMap<string, KekProvider>;
+  /** KEK for re-encrypting credentials after a token refresh. */
+  activeKek: KekProvider;
   /** PUBLISH_MODE: anything other than "live" never calls a platform. */
   mode: "live" | "dry_run";
-  adapters: {
-    bluesky: ChannelAdapter<BlueskyCredential>;
-    facebook: ChannelAdapter<FacebookPageCredential> | null;
-  };
+  /** Adapters for the channels configured on this server (missing → that channel can't send). */
+  adapters: Partial<Record<PublishableChannel, ChannelAdapter<any>>>;
   /** SSRF-safe fetch for customer-supplied hosts (WordPress sites). */
   safeFetch: typeof fetch;
   now?: () => Date;
@@ -110,6 +114,23 @@ type Prepared =
 
 /** Process one publication. Safe to call concurrently and repeatedly. Returns a short outcome label. */
 export async function processPublication(deps: PublisherDeps, args: { tenantId: string; publicationId: string }): Promise<string> {
+  // Renew an expiring access token first (its own short transaction, serialized per connection).
+  const integrationId = await inTenant(deps.publisherDb, { tenantId: args.tenantId }, async (q) => {
+    const { rows } = await q.query<{ integration_id: string | null }>(`SELECT integration_id FROM publications WHERE id = $1 AND status = 'queued'`, [args.publicationId]);
+    return rows[0]?.integration_id ?? null;
+  });
+  if (integrationId) {
+    const refreshed = await ensureFreshToken(deps, { tenantId: args.tenantId, integrationId }).catch((err) => {
+      deps.log?.("[publisher] token refresh failed", err);
+      return "failed" as const;
+    });
+    // The token couldn't be renewed for a passing reason (platform or network trouble): try again
+    // shortly rather than letting the gate turn an expiring token into a cancelled post.
+    if (refreshed === "failed") {
+      const deferred = await inTenant(deps.publisherDb, { tenantId: args.tenantId }, (q) => deferForToken(q, args.publicationId, integrationId, deps.now?.() ?? new Date()));
+      if (deferred) return "token_retry";
+    }
+  }
   const now = deps.now?.() ?? new Date();
   const prepared = await inTenant(deps.publisherDb, { tenantId: args.tenantId }, (q) => prepare(deps, q, args.tenantId, args.publicationId, now));
   if (prepared.kind === "done") return prepared.outcome;
@@ -117,8 +138,8 @@ export async function processPublication(deps: PublisherDeps, args: { tenantId: 
   let result: { externalId: string; permalink: string | null } | null = null;
   let error: PublishError | null = null;
   try {
-    const adapter = prepared.channel === "bluesky" ? deps.adapters.bluesky : deps.adapters.facebook;
-    if (!adapter) throw new PublishError("permanent", "Facebook publishing isn't configured on this server.");
+    const adapter = deps.adapters[prepared.channel];
+    if (!adapter) throw new PublishError("permanent", `Publishing to ${prepared.channel} isn't configured on this server.`);
     result = await (adapter as ChannelAdapter<unknown>).publish(prepared.post, prepared.credential);
   } catch (err) {
     // Unknown failures might have happened after the platform accepted the post: treat as ambiguous.
@@ -171,6 +192,11 @@ async function prepare(deps: PublisherDeps, q: QueryClient, tenantId: string, pu
     lint = [...lintForBrand(post, ctx), ...carriedAiFindings(item.findings as never)];
   } catch (err) {
     lint = [{ code: "brand.inactive", severity: "blocker" as const, message: err instanceof Error ? err.message : "Brand DNA unavailable" }];
+  }
+  // An expired token that can't be renewed without the person (LinkedIn) means reconnecting.
+  if (integration?.status === "connected" && integration.tokenExpiresAt && new Date(integration.tokenExpiresAt) <= now && isPublishableChannel(integration.channel) && !deps.adapters[integration.channel]?.refresh) {
+    await setIntegrationStatus(q, integration.id, "needs_reauth");
+    integration.status = "needs_reauth";
   }
   const credential = integration ? await readCredential(q, integration.id) : null;
   const gate = evaluatePublishGate({
@@ -226,6 +252,19 @@ async function prepare(deps: PublisherDeps, q: QueryClient, tenantId: string, pu
   await moveItem(q, tenantId, item, { type: "start_publish" }, { publicationId: pub.id });
   await appendAudit(q, tenantId, { actorType: "system", actorId: SYSTEM.id, action: "publish.started", entityType: "publication", entityId: pub.id, after: { channel: item.channel, attempt: pub.attempts + 1 } });
   return { kind: "send", publicationId: pub.id, itemId: item.id, integrationId: integration!.id, channel: item.channel as PublishableChannel, attempts: pub.attempts + 1, post: publishablePost(post, pub.idempotencyKey), credential: secret };
+}
+
+const GATE_TOKEN_MARGIN_MS = 10 * 60_000;
+
+/** Re-check in 5 minutes if the token is inside the gate's margin and the post isn't a day late. */
+async function deferForToken(q: QueryClient, publicationId: string, integrationId: string, now: Date): Promise<boolean> {
+  const pub = await lockPublication(q, publicationId);
+  const integration = await getIntegration(q, integrationId);
+  if (!pub || pub.status !== "queued" || !integration?.tokenExpiresAt) return false;
+  if (new Date(integration.tokenExpiresAt).getTime() - now.getTime() > GATE_TOKEN_MARGIN_MS) return false;
+  if (pub.scheduledFor && now.getTime() - new Date(pub.scheduledFor).getTime() > PAUSE_STALE_MS) return false;
+  await updatePublication(q, pub.id, { nextAttemptAt: new Date(now.getTime() + PAUSE_RECHECK_MS).toISOString(), lastError: "Couldn't renew the account's access right now; trying again in a few minutes." });
+  return true;
 }
 
 /** Backoff for retryable failures: the platform's Retry-After if longer, else 1, 2, 4, 8 minutes (max 1 hour). */
@@ -299,6 +338,7 @@ export function startDispatcher(deps: PublisherDeps, intervalMs = 30_000): () =>
     try {
       await dispatchDue(deps);
       await runRequestedChecks(deps);
+      await refreshExpiringTokens(deps);
     } catch (err) {
       deps.log?.("[publisher] dispatch pass failed", err);
     } finally {
@@ -322,6 +362,14 @@ export interface CheckResult {
 
 /** Test a connection with its stored credentials. `userId` is who asked (absent: the worker's own health check). */
 export async function checkIntegration(deps: PublisherDeps, args: { tenantId: string; integrationId: string; userId?: string }): Promise<CheckResult> {
+  const refreshed = await ensureFreshToken(deps, args).catch((err) => {
+    deps.log?.("[publisher] token refresh failed", err);
+    return "failed" as const;
+  });
+  if (refreshed === "auth_failed") {
+    await inTenant(deps.publisherDb, { tenantId: args.tenantId }, (q) => clearCheckRequest(q, args.integrationId));
+    return { ok: false, message: "The platform refused to renew this account's access. Reconnect it." };
+  }
   const loaded = await inTenant(deps.publisherDb, { tenantId: args.tenantId }, async (q) => {
     const integration = await getIntegration(q, args.integrationId);
     if (!integration || integration.status === "revoked") return null;
@@ -342,10 +390,10 @@ export async function checkIntegration(deps: PublisherDeps, args: { tenantId: st
   let accountName = integration.displayName;
   let status: IntegrationRow["status"] = integration.status;
   try {
-    if (integration.channel === "bluesky") accountName = (await deps.adapters.bluesky.check(secret as BlueskyCredential)).accountName;
-    else if (integration.channel === "facebook") {
-      if (!deps.adapters.facebook) throw new PublishError("permanent", "Facebook isn't configured on this server.");
-      accountName = (await deps.adapters.facebook.check(secret as FacebookPageCredential)).accountName;
+    if (isPublishableChannel(integration.channel)) {
+      const adapter = deps.adapters[integration.channel];
+      if (!adapter) throw new PublishError("permanent", `${integration.channel} isn't configured on this server.`);
+      accountName = (await adapter.check(secret)).accountName;
     } else if (integration.channel === "wordpress") {
       const h = await new WordPressClient(secret as WordPressCredential, deps.safeFetch).health();
       accountName = (secret as WordPressCredential).siteUrl;
@@ -380,4 +428,92 @@ export async function runRequestedChecks(deps: PublisherDeps, limit = 20): Promi
     }
   }
   return pending.length;
+}
+
+// ---------------------------------------------------------------------------
+// Access-token refresh
+// ---------------------------------------------------------------------------
+
+/**
+ * Renew the connection's access token if it expires within the adapter's window. The connection
+ * row is locked for the duration, so two workers never spend the same (possibly single-use)
+ * refresh token. A refused refresh marks the connection "Reconnect needed".
+ */
+export async function ensureFreshToken(deps: PublisherDeps, args: { tenantId: string; integrationId: string; force?: boolean }): Promise<"refreshed" | "fresh" | "not_refreshable" | "skipped" | "auth_failed" | "failed"> {
+  // Set once the platform has issued new tokens and cleared once they are committed. If the
+  // database write fails in between, a rotated refresh token may be lost: say so, don't fail silently.
+  let issuedButUnsaved = false;
+  try {
+    return await inTenant(deps.publisherDb, { tenantId: args.tenantId }, async (q) => {
+      const integ = await lockIntegration(q, args.integrationId);
+      if (!integ || integ.status !== "connected") return "skipped";
+      const refresher = isPublishableChannel(integ.channel) ? deps.adapters[integ.channel]?.refresh : undefined;
+      if (!refresher) return "not_refreshable";
+      const now = (deps.now?.() ?? new Date()).getTime();
+      if (!integ.tokenExpiresAt || (!args.force && new Date(integ.tokenExpiresAt).getTime() - now > refresher.windowMs)) return "fresh";
+      const rec = await readCredential(q, integ.id);
+      if (!rec) return "skipped";
+      const ctx = { tenantId: args.tenantId, integrationId: integ.id };
+      const cred = JSON.parse(await decryptSecret(rec, ctx, deps.keks)) as unknown;
+      let out;
+      try {
+        out = await refresher.run(cred);
+      } catch (err) {
+        const e = err instanceof PublishError ? err : new PublishError("transient", err instanceof Error ? err.message : String(err));
+        if (e.kind === "auth") await setIntegrationStatus(q, integ.id, "needs_reauth");
+        await appendAudit(q, args.tenantId, { actorType: "system", actorId: SYSTEM.id, action: "integration.refresh_failed", entityType: "integration", entityId: integ.id, after: { kind: e.kind, error: e.message.slice(0, 300) } });
+        return e.kind === "auth" ? "auth_failed" : "failed";
+      }
+      issuedButUnsaved = true;
+      // Keep a known expiry if the platform didn't send one (a null would stop renewals).
+      const expiresAt = out.tokenExpiresAt ?? integ.tokenExpiresAt;
+      await updateCredential(q, integ.id, await encryptSecret(JSON.stringify(out.credential), ctx, deps.activeKek));
+      await setTokenExpiry(q, integ.id, expiresAt);
+      await appendAudit(q, args.tenantId, { actorType: "system", actorId: SYSTEM.id, action: "integration.token_refreshed", entityType: "integration", entityId: integ.id, after: { tokenExpiresAt: expiresAt } });
+      return "refreshed";
+    }).then((r) => {
+      issuedButUnsaved = false;
+      return r;
+    });
+  } catch (err) {
+    if (issuedButUnsaved) {
+      deps.log?.("[publisher] refreshed token could not be saved", err);
+      await inTenant(deps.publisherDb, { tenantId: args.tenantId }, async (q) => {
+        await setIntegrationStatus(q, args.integrationId, "needs_reauth");
+        await appendAudit(q, args.tenantId, { actorType: "system", actorId: SYSTEM.id, action: "integration.refresh_unsaved", entityType: "integration", entityId: args.integrationId });
+      }).catch((e2) => deps.log?.("[publisher] couldn't flag the connection either", e2));
+      return "auth_failed";
+    }
+    throw err;
+  }
+}
+
+/**
+ * Background renewal for platforms whose grant is lost if a token lapses (Threads). Other
+ * platforms refresh on demand right before a send or a connection check.
+ */
+/** Last failed background attempt per connection (in memory): failed renewals back off for an hour. */
+const backgroundFailures = new Map<string, number>();
+const BACKGROUND_RETRY_MS = 60 * 60_000;
+
+export async function refreshExpiringTokens(deps: PublisherDeps, horizonMs = 8 * 24 * 3_600_000): Promise<number> {
+  const now = deps.now?.() ?? new Date();
+  const keepAlive = PUBLISHABLE_CHANNELS.filter((c) => deps.adapters[c]?.refresh?.keepAlive);
+  const due = await inAnonymous(deps.publisherDb, (q) => findExpiringTokens(q, new Date(now.getTime() + horizonMs), keepAlive));
+  let n = 0;
+  for (const d of due) {
+    const failedAt = backgroundFailures.get(d.id);
+    if (failedAt && now.getTime() - failedAt < BACKGROUND_RETRY_MS) continue;
+    try {
+      const r = await ensureFreshToken(deps, { tenantId: d.tenantId, integrationId: d.id });
+      if (r === "refreshed") {
+        n++;
+        backgroundFailures.delete(d.id);
+      } else if (r === "failed") backgroundFailures.set(d.id, now.getTime());
+    } catch (err) {
+      backgroundFailures.set(d.id, now.getTime());
+      deps.log?.(`[publisher] background refresh ${d.id} failed`, err);
+    }
+  }
+  return n;
 }

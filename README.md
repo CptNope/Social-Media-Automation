@@ -2,7 +2,7 @@
 
 An AI-powered, brand-aware marketing automation platform by **Jeremy Anderson Tech**. It learns a business's brand and verified facts once (Brand DNA + Claim Registry), then plans, drafts, quality-checks, schedules, publishes and reports on marketing across websites and social channels — with human approval wherever there's risk.
 
-> **Status:** Phases 1–4 built: foundation, AI layer, Brand DNA onboarding, planning calendar, AI drafting with checks, approvals, CSV export, and publishing (scheduling, the publisher with its safety checks, pause switches, a Connections page with Bluesky, Facebook Pages and the WordPress connector plugin). Everything is tested against real Postgres with mocked platforms: **nothing has been sent to a live Bluesky, Facebook or WordPress account yet**, and the AI and crawler have not called the live Claude API or crawled a real site. Publishing stays in dry-run until both `PUBLISH_MODE=live` and a per-client admin switch are set. No integration is claimed to work until its adapter passes staging tests.
+> **Status:** Phases 1–4 built: foundation, AI layer, Brand DNA onboarding, planning calendar, AI drafting with checks, approvals, CSV export, and publishing (scheduling, the publisher with its safety checks, pause switches, a Connections page with Facebook Pages, Google Business Profile, LinkedIn, Threads, X, Bluesky and the WordPress connector plugin). Everything is tested against real Postgres with mocked platforms: **nothing has been sent to a live account on any platform yet**, and the AI and crawler have not called the live Claude API or crawled a real site. Publishing stays in dry-run until both `PUBLISH_MODE=live` and a per-client admin switch are set. No integration is claimed to work until its adapter passes staging tests.
 
 ## Planning documents
 
@@ -59,7 +59,7 @@ flowchart LR
     G -->|approved| H["Schedule"]
     G -->|approved| X["CSV export<br/>(post by hand)"]
     H --> I["Publisher re-checks<br/>at send time"]
-    I -->|live| J["Bluesky / Facebook"]
+    I -->|live| J["Facebook · LinkedIn · Google Business Profile<br/>Threads · X · Bluesky"]
     I -->|dry run or blocked| G2["Back to approved,<br/>reason shown"]
 ```
 
@@ -87,7 +87,7 @@ flowchart TB
     P --> CR
     W -->|plan, draft, review| AI["Claude API"]
     W -->|crawl| SITE["Client website"]
-    P -->|publish| PLAT["Bluesky · Facebook Pages · WordPress plugin"]
+    P -->|"publish, renew tokens"| PLAT["Facebook · LinkedIn · Google Business Profile<br/>Threads · X · Bluesky · WordPress plugin"]
 ```
 
 | Package | What it does |
@@ -97,7 +97,7 @@ flowchart TB
 | `packages/vault` | Envelope encryption for platform credentials |
 | `packages/ai` | Claude client, structured outputs, budget guard, agents |
 | `packages/ingest` | Website crawler and the SSRF-safe fetch client |
-| `packages/integrations` | Bluesky, Facebook Pages and WordPress clients |
+| `packages/integrations` | Platform clients: Facebook Pages, Google Business Profile, LinkedIn, Threads, X, Bluesky, WordPress |
 | `apps/web` | Dashboard, background jobs and the publisher |
 | `wordpress-plugin/jat-connector` | WordPress plugin for drafts and SEO changes |
 
@@ -198,8 +198,12 @@ sequenceDiagram
     participant D as Dispatcher
     participant DB as Postgres
     participant G as Publish gate
-    participant A as Bluesky / Facebook
+    participant A as Platform API
     D->>DB: find due posts (ids + times only)
+    opt access token expires soon (X, Google, Threads)
+        D->>A: renew the token (one worker at a time per account)
+        D->>DB: store the new token, encrypted
+    end
     D->>DB: lock the post (skip if another worker has it)
     D->>G: pauses? mode? approved hash = current text?<br/>lint clean? account connected?
     alt blocked or paused
@@ -297,18 +301,43 @@ Environment variables (see `.env.example`):
 | `PUBLISH_MODE` | worker | no | `live` to send; anything else is dry-run (default) |
 | `PUBLISHER_INTERVAL_SECONDS` | worker | no | Dispatcher interval (default 30) |
 | `LOCAL_KEK_BASE64` | both | development | Credential encryption key. Production needs a KMS provider (not built yet, VAULT-2) |
-| `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `FACEBOOK_GRAPH_VERSION` | both | for Facebook | Register `{BASE_URL}/oauth/facebook/callback` as the redirect URI |
+| `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `FACEBOOK_GRAPH_VERSION` | both | for Facebook | |
+| `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_VERSION` | both | for LinkedIn | Version defaults to `202610` |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | both | for Google Business Profile | |
+| `THREADS_APP_ID`, `THREADS_APP_SECRET`, `THREADS_GRAPH_HOST` | both | for Threads | Host defaults to `graph.threads.net` |
+| `X_CLIENT_ID`, `X_CLIENT_SECRET` | both | for X | |
+
+Each platform's redirect URI is `{BASE_URL}/oauth/{channel}/callback`, where channel is `facebook`, `linkedin`, `google_business_profile`, `threads` or `x`. A platform without credentials shows "not configured" on the Connections page.
 | `TRUSTED_PROXIES` | web | no | Number of reverse proxies, for client IPs |
 
 Not ready yet for production: sign-in email delivery (AUTH-2), the KMS key provider (VAULT-2), and live tests against each platform. See the [backlog](docs/J-development-backlog.md).
 
 ### Connecting accounts
 
-| Channel | What you need | Where |
+| Channel | What you need from the platform | Access lasts | Cost |
+|---|---|---|---|
+| Facebook Pages | A Meta app with `pages_manage_posts` approved; a Page role that can create content | Until revoked | Free |
+| Google Business Profile | Google Cloud project with Business Profile API access approved (profile verified 60+ days) | Renewed automatically | Free |
+| LinkedIn | Community Management API access (Development, then Standard tier); Super admin or Content admin on the Company Page | **60 days, then reconnect** (the Connections page warns 14 days ahead) | Free |
+| Threads | A Meta app with `threads_basic`, `threads_content_publish`, `threads_delete` | Renewed automatically, in the background | Free |
+| X | An X developer app (OAuth 2.0, confidential client) with prepaid API credits | Renewed automatically | **$0.015 per post, $0.20 if it contains a link**, charged to the app's credits |
+| Bluesky | Handle + an app password (Settings → Privacy and security → App passwords) | Until revoked | Free |
+| WordPress | The JAT Connector plugin, a dedicated user and its Application Password | Until revoked | Free |
+
+On the Connections page, click **Connect with …**, sign in on the platform, then pick the Page, location or account to post to. Tokens are stored encrypted and never shown in the browser. WordPress also needs its signing secret pasted into Settings → JAT Connector, then **Test connection**.
+
+What each platform receives:
+
+| Channel | Text limit | The link becomes |
 |---|---|---|
-| Bluesky | Handle + an app password (Bluesky → Settings → Privacy and security → App passwords) | Connections → Bluesky |
-| Facebook Pages | A Meta app with `pages_manage_posts` approved, and a role on the Page that can create content | Connections → **Connect with Facebook**, then pick the Page |
-| WordPress | The JAT Connector plugin, a dedicated user and its Application Password | Connections → WordPress; paste the signing secret it shows into Settings → JAT Connector, then **Test connection** |
+| Facebook | 63,206 characters | A link preview |
+| Google Business Profile | 1,500 characters | A **Learn more** button |
+| LinkedIn | 3,000 characters | An article card |
+| Threads | 500 characters | A link attachment |
+| X | 280 weighted characters (links count 23, emoji 2) | Part of the text |
+| Bluesky | 300 graphemes | A link card |
+
+Image and video posts (and so Instagram, TikTok, Pinterest and YouTube) come with the graphics renderer; until then those posts use the CSV export.
 
 ## Troubleshooting
 
@@ -318,7 +347,8 @@ Not ready yet for production: sign-in email delivery (AUTH-2), the KMS key provi
 | `initdb` refuses to run as root | Postgres safety check | The test harness uses `runuser -u postgres` automatically when run as root |
 | Post page says "Dry run (not sent)" | `PUBLISH_MODE` isn't `live`, or the client isn't enabled | See "Turning on live publishing" |
 | Can't schedule a post | Image posts aren't supported yet, the channel has no adapter, or the account isn't connected | Use the CSV export, or fix the connection |
-| "Reconnect needed" | The platform rejected the stored sign-in | Reconnect the account on Connections, then **Retry now** |
+| "Reconnect needed" | The platform rejected the stored sign-in, refused to renew it, or (LinkedIn) the 60 days ran out | Reconnect the account on Connections, then **Retry now** |
+| A platform says "not configured" | Its app credentials aren't set | Set the variables in the table above and restart |
 | App refuses to start in production | `JAT_PROCESS` not set, or `LOCAL_KEK_BASE64` used | Run separate `web` and `worker` processes; a KMS provider is required |
 
 ## Safety principles (enforced in code, not prompts)

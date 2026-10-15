@@ -43,15 +43,30 @@ export interface ConnectionsData {
   integrations: IntegrationRow[];
   publications: PublicationRow[];
   canManage: boolean;
-  facebookConfigured: boolean;
+  /** Which OAuth channels have app credentials on this server. */
+  oauthConfigured: Record<string, boolean>;
   flash?: { kind: "ok" | "error"; message: string } | undefined;
 }
 
-const CONNECTABLE: Array<{ channel: string; blurb: string }> = [
-  { channel: "facebook", blurb: "Posts to a Facebook Page you manage. You'll sign in with Facebook and pick the Page." },
+interface Connectable {
+  channel: string;
+  blurb: string;
+  /** Environment variables that enable an OAuth channel. */
+  env?: string;
+  note?: string;
+}
+const CONNECTABLE: Connectable[] = [
+  { channel: "facebook", blurb: "Posts to a Facebook Page you manage. You'll sign in with Facebook and pick the Page.", env: "FACEBOOK_APP_ID / FACEBOOK_APP_SECRET" },
+  { channel: "google_business_profile", blurb: "Posts updates to a Business Profile location (Google Search and Maps). You'll sign in with Google and pick the location.", env: "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET", note: "Google reviews posts after publishing; a post can show as pending for a while." },
+  { channel: "linkedin", blurb: "Posts to a LinkedIn Company Page where you're a Super admin or Content admin.", env: "LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET", note: "LinkedIn access lasts 60 days and can't be renewed automatically: reconnect before it expires." },
+  { channel: "threads", blurb: "Posts text and links to a Threads profile. You'll sign in with Threads.", env: "THREADS_APP_ID / THREADS_APP_SECRET" },
+  { channel: "x", blurb: "Posts to an X account. Links go inside the post text.", env: "X_CLIENT_ID / X_CLIENT_SECRET", note: "X charges per post from the account's API credits: about $0.015 per post, $0.20 if it contains a link." },
   { channel: "bluesky", blurb: "Posts with an app password (Bluesky → Settings → Privacy and security → App passwords). Never use your main password." },
   { channel: "wordpress", blurb: "Connects the JAT Connector plugin for SEO changes and blog drafts. Needs a WordPress application password." },
 ];
+/** Channels whose access can't be renewed without the person (warn before it runs out). */
+const MANUAL_RENEWAL = new Set(["linkedin"]);
+const DAY_MS = 86_400_000;
 
 export function connectionsPage(shell: Shell, d: ConnectionsData): Html {
   const w = shell.workspace!;
@@ -72,12 +87,14 @@ ${attention.length ? notice("error", `${attention.length} post${attention.length
   ${d.canManage ? html`<form method="post" action="/w/${w.id}/connections/pause">${csrfField(shell.csrf)}<input type="hidden" name="paused" value="1"><div class="field"><label for="pr">Reason <span class="hint">Optional</span></label><input id="pr" name="reason" type="text" maxlength="300"></div><button class="danger" type="submit">Pause all publishing</button></form>` : ""}`
   }
 </section>
-${CONNECTABLE.map(({ channel, blurb }) => {
+${CONNECTABLE.map(({ channel, blurb, env, note }) => {
   const i = byChannel.get(channel);
+  const daysLeft = i?.tokenExpiresAt ? Math.floor((new Date(i.tokenExpiresAt).getTime() - Date.now()) / DAY_MS) : null;
   return html`<section class="panel" id="ch-${channel}"><h2>${CHANNEL_LABELS[channel] ?? channel}</h2>
   ${
     i
-      ? html`<dl class="facts small"><dt>Account</dt><dd>${i.displayName}</dd><dt>Status</dt><dd>${intTag(i.status)}${i.channelPaused ? html` <span class="tag pending">Paused</span>` : ""}</dd><dt>Last checked</dt><dd>${when(i.lastHealthCheckAt) || "Never"}</dd><dt>Connected</dt><dd>${when(i.createdAt)}</dd></dl>
+      ? html`<dl class="facts small"><dt>Account</dt><dd>${i.displayName}</dd><dt>Status</dt><dd>${intTag(i.status)}${i.channelPaused ? html` <span class="tag pending">Paused</span>` : ""}</dd><dt>Last checked</dt><dd>${when(i.lastHealthCheckAt) || "Never"}</dd><dt>Connected</dt><dd>${when(i.createdAt)}</dd>${MANUAL_RENEWAL.has(channel) && i.tokenExpiresAt ? html`<dt>Access expires</dt><dd>${when(i.tokenExpiresAt)}</dd>` : ""}</dl>
+  ${MANUAL_RENEWAL.has(channel) && daysLeft !== null && daysLeft <= 14 && i.status === "connected" ? notice("warn", daysLeft < 0 ? "Access has expired. Reconnect to keep publishing." : `Access expires in ${daysLeft} day${daysLeft === 1 ? "" : "s"}. Reconnect before then to keep publishing.`) : ""}
   ${
     d.canManage
       ? html`<div class="row">
@@ -89,7 +106,8 @@ ${CONNECTABLE.map(({ channel, blurb }) => {
   }`
       : html`<p class="muted">${blurb}</p>`
   }
-  ${d.canManage ? connectForm(shell, w.id, channel, !!i, d.facebookConfigured) : ""}
+  ${note ? html`<p class="small muted">${note}</p>` : ""}
+  ${d.canManage ? connectForm(shell, w.id, channel, !!i, env ? !!d.oauthConfigured[channel] : true, env) : ""}
 </section>`;
 })}
 <section class="panel"><h2>Recent publishing</h2>
@@ -107,11 +125,12 @@ ${
   );
 }
 
-function connectForm(shell: Shell, tenantId: string, channel: string, connected: boolean, facebookConfigured: boolean): Html {
+function connectForm(shell: Shell, tenantId: string, channel: string, connected: boolean, configured: boolean, env?: string): Html {
   const label = connected ? "Connect a different account" : "Connect";
-  if (channel === "facebook") {
-    if (!facebookConfigured) return html`<p class="small muted">Facebook isn't configured on this server (FACEBOOK_APP_ID / FACEBOOK_APP_SECRET).</p>`;
-    return html`<form method="post" action="/w/${tenantId}/connections/facebook/start">${csrfField(shell.csrf)}<button ${connected ? html`class="secondary"` : ""} type="submit">${connected ? "Reconnect or switch Page" : "Connect with Facebook"}</button></form>`;
+  const name = CHANNEL_LABELS[channel] ?? channel;
+  if (env) {
+    if (!configured) return html`<p class="small muted">${name} isn't configured on this server (${env}).</p>`;
+    return html`<form method="post" action="/w/${tenantId}/connections/${channel}/start">${csrfField(shell.csrf)}<button ${connected ? html`class="secondary"` : ""} type="submit">${connected ? "Reconnect or switch" : `Connect with ${name === "Google Business Profile" ? "Google" : name}`}</button></form>`;
   }
   if (channel === "bluesky") {
     return html`<details class="inline-details" ${connected ? "" : html`open`}><summary class="button ${connected ? "secondary" : ""}">${label}</summary>
@@ -139,24 +158,25 @@ const safeHttps = (u: string): string => {
   }
 };
 
-export function facebookPickPage(shell: Shell, d: { key: string; pages: Array<{ id: string; name: string; canPost: boolean }> }): Html {
+export function accountPickPage(shell: Shell, d: { key: string; channel: string; channelLabel: string; noun: string; accounts: Array<{ id: string; name: string; canPost: boolean; reason: string | null }> }): Html {
   const w = shell.workspace!;
-  const usable = d.pages.filter((p) => p.canPost);
+  const usable = d.accounts.filter((a) => a.canPost);
+  const blocked = d.accounts.filter((a) => !a.canPost);
   return page(
     shell,
-    html`<div class="page-head"><div><h1>Choose a Facebook Page</h1><p class="muted">Posts will go to the Page you pick. You can change it later.</p></div></div>
+    html`<div class="page-head"><div><h1>Choose a ${d.channelLabel} ${d.noun}</h1><p class="muted">Posts will go to the ${d.noun} you pick. You can change it later.</p></div></div>
 ${
   usable.length
-    ? html`<form method="post" action="/w/${w.id}/connections/facebook/pick" class="panel">${csrfField(shell.csrf)}<input type="hidden" name="k" value="${d.key}">
-  <fieldset><legend>Pages you can post to</legend>
-  ${usable.map((p, n) => html`<div><label><input type="radio" name="page_id" value="${p.id}" ${n === 0 ? html`checked` : ""}> ${p.name}</label></div>`)}
+    ? html`<form method="post" action="/w/${w.id}/connections/${d.channel}/pick" class="panel">${csrfField(shell.csrf)}<input type="hidden" name="k" value="${d.key}">
+  <fieldset><legend>${d.channelLabel} ${d.noun === "account" ? "accounts" : `${d.noun}s`} you can post to</legend>
+  ${usable.map((a, n) => html`<div><label><input type="radio" name="account_id" value="${a.id}" ${n === 0 ? html`checked` : ""}> ${a.name}</label></div>`)}
   </fieldset>
-  <button type="submit">Connect this Page</button>
+  <button type="submit">Connect</button>
 </form>`
-    : notice("error", "Facebook didn't return any Pages you can post to. You need a role on the Page that allows creating content.")
+    : notice("error", `${d.channelLabel} didn't return anything you can post to.`)
 }
-${d.pages.length > usable.length ? html`<p class="small muted">Not listed: ${d.pages.filter((p) => !p.canPost).map((p) => p.name).join(", ")} (your role there can't create posts).</p>` : ""}
-<p><a href="/w/${w.id}/connections">Cancel</a></p>`,
+${blocked.length ? html`<section class="panel"><h2>Not available</h2><ul>${blocked.map((a) => html`<li>${a.name}${a.reason ? html` <span class="small muted">— ${a.reason}</span>` : ""}</li>`)}</ul></section>` : ""}
+<p><a href="/w/${w.id}/connections#ch-${d.channel}">Cancel</a></p>`,
   );
 }
 

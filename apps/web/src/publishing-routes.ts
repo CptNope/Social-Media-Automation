@@ -25,12 +25,13 @@ import {
   type MemberRole,
   type QueryClient,
 } from "@jat/db";
-import { FACEBOOK_SCOPES, PublishError, type BlueskyCredential, type ChannelAdapter, type FacebookPagesAdapter } from "@jat/integrations";
+import { PublishError, pkcePair, type BlueskyCredential, type ChannelAdapter, type ConnectableAccount, type OAuthConnector } from "@jat/integrations";
 import { encryptSecret, type KekProvider } from "@jat/vault";
 import { machineState, type RouteCtx } from "./content-routes.ts";
 import { HttpError, htmlResponse, parseCookies, redirect, serializeCookie, type Req, type Router } from "./http.ts";
 import { checkIntegration, publishBlocker, type PublisherDeps } from "./publisher.ts";
 import * as P from "./views/publishing.ts";
+import { CHANNEL_LABELS } from "./views/content.ts";
 
 /** Everything the web tier needs for publishing. Absent → publishing isn't configured (export only). */
 export interface PublishingConfig {
@@ -40,8 +41,8 @@ export interface PublishingConfig {
   activeKek: KekProvider;
   /** Used to verify an app password before storing it. */
   bluesky: Pick<ChannelAdapter<BlueskyCredential>, "check">;
-  /** Facebook app (OAuth); null when FACEBOOK_APP_ID/SECRET aren't set. */
-  facebook: FacebookPagesAdapter | null;
+  /** OAuth sign-in for each channel whose app credentials are configured (absent → "not configured"). */
+  oauth: Partial<Record<OAuthChannel, OAuthConnector<unknown>>>;
   /**
    * The publisher, when it runs in this process (JAT_PROCESS=all). Null in a web-only process:
    * "Test connection" is then queued for the worker instead of reading credentials here.
@@ -60,7 +61,12 @@ export interface PublishingKit {
 
 const MANAGE: MemberRole[] = ["agency_operator", "client_owner"];
 const TZ = DEFAULT_TIMEZONE;
-const FB_STATE_COOKIE = "jat_fb_state";
+/** Channels connected by OAuth sign-in. */
+export const OAUTH_CHANNELS = ["facebook", "linkedin", "google_business_profile", "threads", "x"] as const;
+export type OAuthChannel = (typeof OAUTH_CHANNELS)[number];
+const isOAuthChannel = (c: string): c is OAuthChannel => (OAUTH_CHANNELS as readonly string[]).includes(c);
+/** One state cookie per channel, so sign-ins to two platforms in parallel don't clash. */
+const stateCookie = (channel: OAuthChannel) => `jat_oauth_${channel}`;
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING = 500;
 
@@ -73,8 +79,8 @@ const FLASH: Record<string, { kind: "ok" | "error"; message: string }> = {
   disconnected: { kind: "ok", message: "Disconnected. Its stored credentials were deleted." },
   check_ok: { kind: "ok", message: "Connection works." },
   check_requested: { kind: "ok", message: "Connection check requested. Reload in a few seconds to see the result." },
-  fb_denied: { kind: "error", message: "Facebook sign-in was cancelled." },
-  fb_expired: { kind: "error", message: "That Facebook sign-in expired or didn't match this browser. Try again." },
+  oauth_denied: { kind: "error", message: "Sign-in was cancelled." },
+  oauth_none: { kind: "error", message: "That sign-in didn't give access to anything you can post to." },
 };
 
 /** Short-lived, server-side only. Page tokens never reach the browser. */
@@ -103,8 +109,9 @@ class PendingStore<T> {
 export function registerPublishingRoutes(kit: PublishingKit): void {
   const { router, workspace, idParam } = kit;
   const cfg = kit.config;
-  const oauthStates = new PendingStore<{ tenantId: string; userId: string }>();
-  const pagePicks = new PendingStore<{ tenantId: string; userId: string; pages: Array<{ id: string; name: string; accessToken: string; canPost: boolean }> }>();
+  const oauthStates = new PendingStore<{ tenantId: string; userId: string; channel: OAuthChannel; verifier: string | null }>();
+  const accountPicks = new PendingStore<{ tenantId: string; userId: string; channel: OAuthChannel; accounts: Array<ConnectableAccount<unknown>> }>();
+  const EXPIRED = "That sign-in expired or didn't match this browser. Try again.";
 
   const forbid = (): never => {
     throw new HttpError(403, "Your role doesn't allow this action.");
@@ -120,10 +127,10 @@ export function registerPublishingRoutes(kit: PublishingKit): void {
   };
   const back = (ctx: RouteCtx, m: string, anchor = "") => redirect(`/w/${ctx.tenantId}/connections?m=${m}${anchor}`);
 
-  async function storeConnection(ctx: RouteCtx, a: { channel: string; externalAccountId: string; displayName: string; secret: unknown; capabilities: Record<string, unknown>; scopes: string[]; status?: "connected" | "error" }) {
+  async function storeConnection(ctx: RouteCtx, a: { channel: string; externalAccountId: string; displayName: string; secret: unknown; capabilities: Record<string, unknown>; scopes: readonly string[]; status?: "connected" | "error"; tokenExpiresAt?: string | null }) {
     const c = needConfig();
     await ctx.tx(async (q) => {
-      const id = await upsertIntegration(q, { tenantId: ctx.tenantId, channel: a.channel, externalAccountId: a.externalAccountId, displayName: a.displayName, capabilities: a.capabilities, scopes: a.scopes, ...(a.status ? { status: a.status } : {}) });
+      const id = await upsertIntegration(q, { tenantId: ctx.tenantId, channel: a.channel, externalAccountId: a.externalAccountId, displayName: a.displayName, capabilities: a.capabilities, scopes: [...a.scopes], tokenExpiresAt: a.tokenExpiresAt ?? null, ...(a.status ? { status: a.status } : {}) });
       const rec = await encryptSecret(JSON.stringify(a.secret), { tenantId: ctx.tenantId, integrationId: id }, c.activeKek);
       await insertCredential(q, ctx.tenantId, id, rec);
       await appendAudit(q, ctx.tenantId, { actorType: "user", actorId: ctx.s.userId, action: "integration.connected", entityType: "integration", entityId: id, after: { channel: a.channel, account: a.displayName } });
@@ -139,7 +146,7 @@ export function registerPublishingRoutes(kit: PublishingKit): void {
         integrations: d.integrations,
         publications: d.publications,
         canManage: MANAGE.includes(ctx.role),
-        facebookConfigured: !!cfg?.facebook,
+        oauthConfigured: Object.fromEntries(OAUTH_CHANNELS.map((c) => [c, !!cfg?.oauth[c]])) as Record<OAuthChannel, boolean>,
         flash,
       }),
       status,
@@ -247,58 +254,80 @@ export function registerPublishingRoutes(kit: PublishingKit): void {
     return htmlResponse(P.wordpressSecretPage(await ctx.shell("connections", "Connect WordPress"), { siteUrl, secret: signingSecret }));
   });
 
-  // ------------------------------------------------------------------ Facebook (OAuth)
-  router.post("/w/:tenantId/connections/facebook/start", async (req) => {
+  // ------------------------------------------------------------------ OAuth sign-in (Facebook, LinkedIn, Google, Threads, X)
+  const connectorFor = (channel: string): { channel: OAuthChannel; connector: OAuthConnector<unknown> } => {
+    if (!isOAuthChannel(channel)) throw new HttpError(404, "Not found");
+    const connector = needConfig().oauth[channel];
+    if (!connector) throw new HttpError(400, `${CHANNEL_LABELS[channel]} isn't configured on this server.`);
+    return { channel, connector };
+  };
+
+  const connectAccount = (ctx: RouteCtx, channel: OAuthChannel, connector: OAuthConnector<unknown>, a: ConnectableAccount<unknown>) =>
+    storeConnection(ctx, { channel, externalAccountId: a.id, displayName: a.name, secret: a.credential, capabilities: { text: true, link: true }, scopes: connector.scopes, tokenExpiresAt: a.tokenExpiresAt });
+
+  router.post("/w/:tenantId/connections/:channel/start", async (req) => {
     const ctx = await manage(req);
-    const fb = needConfig().facebook;
-    if (!fb) throw new HttpError(400, "Facebook isn't configured on this server.");
-    const state = oauthStates.put({ tenantId: ctx.tenantId, userId: ctx.s.userId });
-    return redirect(fb.authorizeUrl(state), { "set-cookie": serializeCookie(FB_STATE_COOKIE, state, { maxAgeSeconds: PENDING_TTL_MS / 1000, secure: kit.secureCookies }) });
+    const { channel, connector } = connectorFor(req.params.channel ?? "");
+    const pkce = connector.usesPkce ? pkcePair() : null;
+    // The PKCE verifier stays server-side with the state; only the challenge goes to the platform.
+    const state = oauthStates.put({ tenantId: ctx.tenantId, userId: ctx.s.userId, channel, verifier: pkce?.verifier ?? null });
+    return redirect(connector.authorizeUrl({ state, ...(pkce ? { codeChallenge: pkce.challenge } : {}) }), { "set-cookie": serializeCookie(stateCookie(channel), state, { maxAgeSeconds: PENDING_TTL_MS / 1000, secure: kit.secureCookies }) });
   });
 
-  router.get("/oauth/facebook/callback", async (req) => {
+  router.get("/oauth/:channel/callback", async (req) => {
     const userId = await kit.requireUserId(req);
-    const fb = needConfig().facebook;
-    if (!fb) throw new HttpError(400, "Facebook isn't configured on this server.");
+    const { channel, connector } = connectorFor(req.params.channel ?? "");
     const state = req.url.searchParams.get("state") ?? "";
-    const cookieState = parseCookies(req.headers.cookie)[FB_STATE_COOKIE] ?? "";
+    const cookieState = parseCookies(req.headers.cookie)[stateCookie(channel)] ?? "";
     const pending = state && state === cookieState ? oauthStates.take(state) : null;
-    const clear = { "set-cookie": serializeCookie(FB_STATE_COOKIE, "", { maxAgeSeconds: 0, secure: kit.secureCookies }) };
-    if (!pending || pending.userId !== userId) throw new HttpError(400, FLASH.fb_expired!.message);
-    if (req.url.searchParams.get("error")) return redirect(`/w/${pending.tenantId}/connections?m=fb_denied`, clear);
+    const clear = { "set-cookie": serializeCookie(stateCookie(channel), "", { maxAgeSeconds: 0, secure: kit.secureCookies }) };
+    if (!pending || pending.userId !== userId || pending.channel !== channel) throw new HttpError(400, EXPIRED);
+    if (req.url.searchParams.get("error")) return redirect(`/w/${pending.tenantId}/connections?m=oauth_denied#ch-${channel}`, clear);
     const code = req.url.searchParams.get("code") ?? "";
-    if (!code || code.length > 2000) throw new HttpError(400, FLASH.fb_expired!.message);
-    let pages;
+    if (!code || code.length > 2000) throw new HttpError(400, EXPIRED);
+    let accounts: Array<ConnectableAccount<unknown>>;
     try {
-      pages = await fb.pagesFromCode(code);
+      accounts = await connector.accountsFromCode({ code, ...(pending.verifier ? { codeVerifier: pending.verifier } : {}) });
     } catch (err) {
-      throw new HttpError(502, `Facebook sign-in failed: ${err instanceof Error ? err.message.slice(0, 200) : "unknown error"}`);
+      throw new HttpError(502, `${CHANNEL_LABELS[channel]} sign-in failed: ${err instanceof Error ? err.message.slice(0, 200) : "unknown error"}`);
     }
-    const key = pagePicks.put({ tenantId: pending.tenantId, userId, pages });
-    return redirect(`/w/${pending.tenantId}/connections/facebook/pick?k=${encodeURIComponent(key)}`, clear);
+    if (!accounts.length) return redirect(`/w/${pending.tenantId}/connections?m=oauth_none#ch-${channel}`, clear);
+    const key = accountPicks.put({ tenantId: pending.tenantId, userId, channel, accounts });
+    return redirect(`/w/${pending.tenantId}/connections/${channel}/pick?k=${encodeURIComponent(key)}`, clear);
   });
 
-  const pickFor = (ctx: RouteCtx, key: string) => {
-    const p = pagePicks.peek(key);
-    if (!p || p.userId !== ctx.s.userId || p.tenantId !== ctx.tenantId) throw new HttpError(400, FLASH.fb_expired!.message);
+  const pickFor = (ctx: RouteCtx, channel: string, key: string) => {
+    const p = accountPicks.peek(key);
+    if (!p || p.userId !== ctx.s.userId || p.tenantId !== ctx.tenantId || p.channel !== channel) throw new HttpError(400, EXPIRED);
     return p;
   };
 
-  router.get("/w/:tenantId/connections/facebook/pick", async (req) => {
+  router.get("/w/:tenantId/connections/:channel/pick", async (req) => {
     const ctx = await manage(req);
+    const { channel, connector } = connectorFor(req.params.channel ?? "");
     const key = req.url.searchParams.get("k") ?? "";
-    const p = pickFor(ctx, key);
-    return htmlResponse(P.facebookPickPage(await ctx.shell("connections", "Choose a Page"), { key, pages: p.pages.map(({ id, name, canPost }) => ({ id, name, canPost })) }));
+    const p = pickFor(ctx, channel, key);
+    // Tokens never reach the page: only ids, names and whether each can post.
+    return htmlResponse(
+      P.accountPickPage(await ctx.shell("connections", `Choose a ${connector.accountNoun}`), {
+        key,
+        channel,
+        channelLabel: CHANNEL_LABELS[channel] ?? channel,
+        noun: connector.accountNoun,
+        accounts: p.accounts.map(({ id, name, canPost, reason }) => ({ id, name, canPost, reason: reason ?? null })),
+      }),
+    );
   });
 
-  router.post("/w/:tenantId/connections/facebook/pick", async (req) => {
+  router.post("/w/:tenantId/connections/:channel/pick", async (req) => {
     const ctx = await manage(req);
+    const { channel, connector } = connectorFor(req.params.channel ?? "");
     const key = req.form.get("k") ?? "";
-    const page = pickFor(ctx, key).pages.find((x) => x.id === req.form.get("page_id"));
-    if (!page || !page.canPost) throw new HttpError(400, "Pick a Page you can post to.");
-    pagePicks.take(key);
-    await storeConnection(ctx, { channel: "facebook", externalAccountId: page.id, displayName: page.name, secret: { pageId: page.id, pageName: page.name, pageAccessToken: page.accessToken }, capabilities: { text: true, link: true }, scopes: FACEBOOK_SCOPES });
-    return back(ctx, "connected", "#ch-facebook");
+    const account = pickFor(ctx, channel, key).accounts.find((x) => x.id === req.form.get("account_id"));
+    if (!account || !account.canPost) throw new HttpError(400, `Pick a ${connector.accountNoun} you can post to.`);
+    accountPicks.take(key);
+    await connectAccount(ctx, channel, connector, account);
+    return back(ctx, "connected", `#ch-${channel}`);
   });
 
   // ------------------------------------------------------------------ scheduling (content items)

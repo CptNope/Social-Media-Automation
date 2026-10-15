@@ -53,26 +53,48 @@ export async function integrationForChannel(tx: QueryClient, channel: string): P
  * Connect an account: revokes any other account on the same channel (one per channel), then
  * inserts the integration or revives a previously revoked row for the same account.
  */
-export async function upsertIntegration(tx: QueryClient, a: { tenantId: string; channel: string; externalAccountId: string; displayName: string; capabilities: Record<string, unknown>; scopes: string[]; status?: IntegrationRow["status"] }): Promise<string> {
+export async function upsertIntegration(tx: QueryClient, a: { tenantId: string; channel: string; externalAccountId: string; displayName: string; capabilities: Record<string, unknown>; scopes: string[]; status?: IntegrationRow["status"]; tokenExpiresAt?: string | null }): Promise<string> {
   const { rows: others } = await tx.query<{ id: string }>(`SELECT id FROM integrations WHERE channel = $1 AND external_account_id <> $2 AND status <> 'revoked' FOR UPDATE`, [a.channel, a.externalAccountId]);
   for (const o of others) {
     await tx.query(`SELECT remove_credential($1)`, [o.id]);
     await tx.query(`UPDATE integrations SET status = 'revoked', check_requested_at = NULL WHERE id = $1 RETURNING id`, [o.id]);
   }
   const { rows } = await tx.query<{ id: string }>(
-    `INSERT INTO integrations (tenant_id, channel, external_account_id, display_name, capabilities, scopes, status, last_health_check_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, string_to_array($6, ','), $7, now())
+    `INSERT INTO integrations (tenant_id, channel, external_account_id, display_name, capabilities, scopes, status, token_expires_at, last_health_check_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, string_to_array($6, ','), $7, $8::timestamptz, now())
      ON CONFLICT (tenant_id, channel, external_account_id) DO UPDATE
        SET display_name = EXCLUDED.display_name, capabilities = EXCLUDED.capabilities, scopes = EXCLUDED.scopes,
-           status = EXCLUDED.status, last_health_check_at = now()  -- a channel pause survives reconnecting
+           status = EXCLUDED.status, token_expires_at = EXCLUDED.token_expires_at, last_health_check_at = now()  -- a channel pause survives reconnecting
      RETURNING id`,
-    [a.tenantId, a.channel, a.externalAccountId, a.displayName, JSON.stringify(a.capabilities), a.scopes.join(","), a.status ?? "connected"],
+    [a.tenantId, a.channel, a.externalAccountId, a.displayName, JSON.stringify(a.capabilities), a.scopes.join(","), a.status ?? "connected", a.tokenExpiresAt ?? null],
   );
   return rows[0]!.id;
 }
 
 export async function setIntegrationStatus(tx: QueryClient, id: string, status: IntegrationRow["status"]): Promise<void> {
   await tx.query(`UPDATE integrations SET status = $2, check_requested_at = CASE WHEN $2 = 'revoked' THEN NULL ELSE check_requested_at END WHERE id = $1 RETURNING id`, [id, status]);
+}
+
+/** Publisher: lock a connection while its token is refreshed (serializes rotating refresh tokens). */
+export async function lockIntegration(tx: QueryClient, id: string): Promise<IntegrationRow | null> {
+  const { rows } = await tx.query<Record<string, unknown>>(`SELECT ${INT_COLS} FROM integrations WHERE id = $1 FOR UPDATE`, [id]);
+  return rows[0] ? intg(rows[0]) : null;
+}
+
+export async function setTokenExpiry(tx: QueryClient, id: string, at: string | null): Promise<void> {
+  await tx.query(`UPDATE integrations SET token_expires_at = $2::timestamptz WHERE id = $1 RETURNING id`, [id, at]);
+}
+
+/** Publisher: connections whose access token expires before `before`, across tenants (ids only). */
+export async function findExpiringTokens(tx: QueryClient, before: Date, channels: readonly string[], limit = 50): Promise<Array<{ id: string; tenantId: string; channel: string }>> {
+  if (!channels.length) return [];
+  await tx.query("SET LOCAL ROLE jat_scheduler");
+  // Filtered by channel in SQL: idle short-lived tokens (X, Google) must never crowd out the ones that need keeping alive.
+  const { rows } = await tx.query<{ id: string; tenant_id: string; channel: string }>(
+    `SELECT id, tenant_id, channel FROM integrations WHERE status = 'connected' AND token_expires_at IS NOT NULL AND token_expires_at < $1::timestamptz AND channel = ANY(string_to_array($2, ',')) ORDER BY token_expires_at LIMIT $3`,
+    [before.toISOString(), channels.join(","), limit],
+  );
+  return rows.map((r) => ({ id: r.id, tenantId: r.tenant_id, channel: r.channel }));
 }
 
 /** Web tier: ask the publisher worker to test this connection. */
@@ -121,6 +143,15 @@ export async function insertCredential(tx: QueryClient, tenantId: string, integr
 
 export async function removeCredential(tx: QueryClient, integrationId: string): Promise<void> {
   await tx.query(`SELECT remove_credential($1)`, [integrationId]);
+}
+
+/** Publisher role only: replace a credential after a token refresh. */
+export async function updateCredential(tx: QueryClient, integrationId: string, rec: CredentialRecord): Promise<void> {
+  const { rows } = await tx.query<{ integration_id: string }>(
+    `UPDATE credentials SET version = $2, kek_id = $3, wrapped_dek = $4, iv = $5, auth_tag = $6, ciphertext = $7, rotated_at = now() WHERE integration_id = $1 RETURNING integration_id`,
+    [integrationId, rec.version, rec.kekId, rec.wrappedDek, rec.iv, rec.authTag, rec.ciphertext],
+  );
+  if (!rows.length) throw new Error("credential not found");
 }
 
 /** Publisher role only (the web role has no SELECT on credentials). */

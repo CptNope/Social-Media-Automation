@@ -43,6 +43,64 @@ export interface ChannelAdapter<Cred> {
   remove(externalId: string, cred: Cred): Promise<void>;
   /** Cheap authenticated call to confirm the connection works. */
   check(cred: Cred): Promise<{ ok: true; accountName: string }>;
+  /** Present when the platform's access tokens expire and can be renewed without the user. */
+  refresh?: TokenRefresher<Cred>;
+}
+
+export interface TokenRefresher<Cred> {
+  /** Refresh when the access token expires within this window. */
+  windowMs: number;
+  /**
+   * Also refresh in the background (not only before a send), because the grant is lost for good
+   * if the token is allowed to lapse (Threads: a 60-day token can only be refreshed before it expires).
+   */
+  keepAlive: boolean;
+  run(cred: Cred): Promise<RefreshedCredential<Cred>>;
+}
+
+export interface RefreshedCredential<Cred> {
+  credential: Cred;
+  /** ISO time the new access token expires, or null if it doesn't. */
+  tokenExpiresAt: string | null;
+}
+
+/** An account the signed-in person can connect (a Page, a Company Page, a location, or their own profile). */
+export interface ConnectableAccount<Cred> {
+  id: string;
+  name: string;
+  canPost: boolean;
+  /** Why it can't post (shown to the person). */
+  reason?: string;
+  /** Server-side only: never rendered or put in a URL. */
+  credential: Cred;
+  tokenExpiresAt: string | null;
+}
+
+/** The OAuth half of a channel: start the sign-in, then turn the returned code into connectable accounts. */
+export interface OAuthConnector<Cred> {
+  channel: Channel;
+  /** "Page", "Company Page", "location", "account". */
+  accountNoun: string;
+  scopes: readonly string[];
+  /** PKCE (S256): the verifier stays server-side. */
+  usesPkce: boolean;
+  authorizeUrl(a: { state: string; codeChallenge?: string }): string;
+  accountsFromCode(a: { code: string; codeVerifier?: string }): Promise<Array<ConnectableAccount<Cred>>>;
+}
+
+/** ISO expiry from an OAuth `expires_in` (seconds), or null. */
+export function expiresAtFrom(expiresIn: unknown, now = Date.now()): string | null {
+  const n = Number(expiresIn);
+  return Number.isFinite(n) && n > 0 ? new Date(now + n * 1000).toISOString() : null;
+}
+
+/** Read a JSON body without throwing (error responses are not always JSON). */
+export async function jsonOrNull(res: Response): Promise<unknown> {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 export type FetchLike = typeof fetch;
@@ -90,4 +148,41 @@ export function retryAfterMs(res: Response): number | undefined {
   if (Number.isFinite(n)) return Math.min(n * 1000, 6 * 3_600_000);
   const at = Date.parse(v);
   return Number.isNaN(at) ? undefined : Math.max(0, Math.min(at - Date.now(), 6 * 3_600_000));
+}
+
+/**
+ * One JSON API call with shared safety rules: errors are classified by the platform's
+ * `classify`, and on a write (a call that may create something public) a "transient" error
+ * is "ambiguous" unless `retrySafe` says it proves nothing was created — the post may exist,
+ * so it is never retried automatically.
+ */
+export async function callJson(
+  f: FetchLike,
+  url: string,
+  init: RequestInit,
+  opts: {
+    write: boolean;
+    classify: (status: number, body: unknown, res: Response) => PublishError;
+    /** For writes: which "transient" errors prove nothing was created (default: HTTP 429 only). */
+    retrySafe?: (status: number, body: unknown) => boolean;
+    timeoutMs?: number;
+  },
+): Promise<{ res: Response; json: unknown }> {
+  const res = await timedFetch(f, url, init, { idempotent: !opts.write, ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) });
+  const json = res.status === 204 ? null : await jsonOrNull(res);
+  if (!res.ok) {
+    const err = opts.classify(res.status, json, res);
+    // On a write, any other "transient" error (5xx, Graph codes 1/2 "unknown"/"unavailable") might have posted.
+    if (opts.write && err.kind === "transient" && !(opts.retrySafe ?? ((s) => s === 429))(res.status, json)) {
+      throw new PublishError("ambiguous", `${err.message} — the post may or may not have been created.`, undefined, err.platformCode);
+    }
+    throw err;
+  }
+  return { res, json };
+}
+
+/** Unix-seconds reset header (X) → milliseconds from now. */
+export function resetHeaderMs(res: Response, header: string, now = Date.now()): number | undefined {
+  const v = Number(res.headers.get(header));
+  return Number.isFinite(v) && v > 0 ? Math.max(0, Math.min(v * 1000 - now, 6 * 3_600_000)) : undefined;
 }

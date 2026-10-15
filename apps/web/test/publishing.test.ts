@@ -171,6 +171,7 @@ describe("publishing: connections, scheduling, the publisher and its safety chec
     deps = {
       publisherDb,
       keks: kek,
+      activeKek: kek,
       mode: "dry_run",
       adapters: { bluesky: bsky, facebook },
       safeFetch: wpFetch,
@@ -183,7 +184,7 @@ describe("publishing: connections, scheduling, the publisher and its safety chec
       },
       activeKek: kek,
       bluesky: bsky,
-      facebook,
+      oauth: { facebook },
       publisher: deps,
     };
     const handler = createApp({
@@ -285,7 +286,7 @@ describe("publishing: connections, scheduling, the publisher and its safety chec
     const dialog = new URL(r.location!);
     assert.equal(dialog.origin, "https://www.facebook.com");
     const state = dialog.searchParams.get("state")!;
-    assert.equal(op.jar.get("jat_fb_state"), state);
+    assert.equal(op.jar.get("jat_oauth_facebook"), state);
 
     // Another signed-in person (or a forged link) can't complete someone else's flow.
     assert.equal((await owner.get(`/oauth/facebook/callback?code=abc&state=${state}`)).status, 400);
@@ -293,18 +294,18 @@ describe("publishing: connections, scheduling, the publisher and its safety chec
 
     const cb = await op.get(`/oauth/facebook/callback?code=abc&state=${state}`);
     assert.equal(cb.status, 303, cb.body.slice(0, 300));
-    assert.equal(op.jar.has("jat_fb_state"), false, "state cookie cleared");
+    assert.equal(op.jar.has("jat_oauth_facebook"), false, "state cookie cleared");
     // Replaying the callback fails (state is single-use).
     assert.equal((await op.get(`/oauth/facebook/callback?code=abc&state=${state}`)).status, 400);
     const pick = await op.get(cb.location!);
     assert.match(pick.body, /Acme Plumbing Page/);
-    assert.match(pick.body, /Not listed: Fan club/);
+    assert.match(pick.body, /Not available[\s\S]*Fan club[\s\S]*can&#39;t create posts/);
     assert.doesNotMatch(pick.body, /PAGE-TOKEN-SECRET|LONG|SHORT/);
     // The pick key is bound to the user.
     const key = new URL(cb.location!, base).searchParams.get("k")!;
     assert.equal((await owner.get(`/w/${T}/connections/facebook/pick?k=${encodeURIComponent(key)}`)).status, 400);
-    assert.equal((await op.post(`/w/${T}/connections/facebook/pick`, { k: key, page_id: "222" }, pick.body)).status, 400, "can't pick a Page without posting rights");
-    const done = await op.post(`/w/${T}/connections/facebook/pick`, { k: key, page_id: "111" }, pick.body);
+    assert.equal((await op.post(`/w/${T}/connections/facebook/pick`, { k: key, account_id: "222" }, pick.body)).status, 400, "can't pick a Page without posting rights");
+    const done = await op.post(`/w/${T}/connections/facebook/pick`, { k: key, account_id: "111" }, pick.body);
     assert.match(done.location!, /m=connected/);
     assert.match((await op.get(done.location!)).body, /Acme Plumbing Page/);
     assert.equal(pg.admin("SELECT count(*) FROM credentials c JOIN integrations i ON i.id = c.integration_id WHERE i.channel = 'facebook'"), "1");
@@ -515,9 +516,12 @@ describe("publishing: connections, scheduling, the publisher and its safety chec
     p = await op.get(`/w/${T}/content/${img}`);
     assert.match(p.body, /designed around an image/);
     assert.equal((await op.post(`/w/${T}/content/${img}/schedule`, { now: "1", fingerprint: fingerprint(p.body) }, p.body)).status, 400);
+    const ig = seedApproved({ hook: "Instagram.", channel: "instagram", format: "image", creative_brief: { template: "tip-card", headline: "x" }, alt_text: "A pipe", link: null });
+    p = await op.get(`/w/${T}/content/${ig}`);
+    assert.match(p.body, /isn&#39;t available for this channel yet/);
     const li = seedApproved({ hook: "LinkedIn.", channel: "linkedin", link: { url: "https://acme.example/?utm_source=linkedin&utm_medium=social&utm_campaign=w" } });
     p = await op.get(`/w/${T}/content/${li}`);
-    assert.match(p.body, /isn&#39;t available for this channel yet/);
+    assert.match(p.body, /Connect the account on the Connections page first/);
 
     assert.equal(bsky.sent.length, sentBefore, "nothing in this test reached the platform");
   });
