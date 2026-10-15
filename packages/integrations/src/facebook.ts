@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { PublishError, timedFetch, type ChannelAdapter, type FetchLike, type PublishablePost, type PublishResult, type ConnectableAccount, type OAuthConnector } from "./types.ts";
+import { PublishError, callJson, timedFetch, type ChannelAdapter, type FetchLike, type PublishablePost, type PublishResult, type ConnectableAccount, type OAuthConnector } from "./types.ts";
 
 /**
  * Facebook Pages adapter (Graph API). See docs/research/2026-10-publishing-apis.md.
@@ -108,12 +108,35 @@ export class FacebookPagesAdapter implements ChannelAdapter<FacebookPageCredenti
 
   // -------------------------------------------------------------- publishing
   async publish(post: PublishablePost, cred: FacebookPageCredential): Promise<PublishResult> {
+    if (post.media) return this.#publishPhoto(post, cred);
     const params: Record<string, string> = { message: post.text };
     if (post.link) params.link = post.link.url;
     const out = (await this.#request("POST", `${encodeURIComponent(cred.pageId)}/feed`, cred.pageAccessToken, params)) as { id?: string };
     if (!out.id) throw new PublishError("ambiguous", "Facebook didn't return a post id.");
     const [pageId, postId] = out.id.split("_");
     return { externalId: out.id, permalink: pageId && postId ? `https://www.facebook.com/${pageId}/posts/${postId}` : null };
+  }
+
+  /** Photo post: the image is uploaded with the request (no public URL needed); the link goes in the text. */
+  async #publishPhoto(post: PublishablePost, cred: FacebookPageCredential): Promise<PublishResult> {
+    const media = post.media!;
+    if (media.kind !== "image") throw new PublishError("permanent", "Facebook video posts aren't supported yet; export this post instead.");
+    const form = new FormData();
+    form.append("message", post.link ? `${post.text}\n\n${post.link.url}` : post.text);
+    form.append("access_token", cred.pageAccessToken);
+    form.append("appsecret_proof", appSecretProof(this.app.appSecret, cred.pageAccessToken));
+    form.append("source", new Blob([new Uint8Array(await media.bytes())], { type: media.mime }), "image");
+    const throttled = new Set([4, 17, 32, 341, 613, 80001]);
+    const { json } = await callJson(this.fetchImpl, this.#graph(`${encodeURIComponent(cred.pageId)}/photos`), { method: "POST", body: form }, {
+      write: true,
+      classify: (st, b) => classifyGraphError(st, b),
+      retrySafe: (st, b) => st === 429 || throttled.has(Number((b as { error?: { code?: number } } | null)?.error?.code)),
+    });
+    const out = json as { id?: string; post_id?: string } | null;
+    const id = out?.post_id ?? out?.id;
+    if (!id) throw new PublishError("ambiguous", "Facebook didn't return a post id.");
+    const [pageId, postId] = id.split("_");
+    return { externalId: id, permalink: pageId && postId ? `https://www.facebook.com/${pageId}/posts/${postId}` : null };
   }
 
   async remove(externalId: string, cred: FacebookPageCredential): Promise<void> {

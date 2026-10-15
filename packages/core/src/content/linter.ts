@@ -1,6 +1,6 @@
 import type { Finding, RiskClass } from "../types.ts";
 import { hasBlockers } from "../types.ts";
-import { PLATFORM_LIMITS, measureLength, publishedText } from "./platform-limits.ts";
+import { PLATFORM_LIMITS, linkGoesInText, measureLength, publishedText, type ImageRule, type VideoRule } from "./platform-limits.ts";
 import { composeCaption, isVisualFormat, type PostDraft } from "./post.ts";
 import { validateTrackedUrl } from "../marketing/utm.ts";
 
@@ -91,7 +91,7 @@ export function lintPost(post: PostDraft, ctx: LintContext): Finding[] {
   const len = measureLength(publishedText(post), limits.countBy);
   if (len > limits.maxChars) {
     const unit = limits.countBy === "x_weighted" ? "characters (X counts links as 23 and emoji as 2)" : limits.countBy;
-    f.push({ code: "length.exceeded", severity: "blocker", field: "body", message: `${limits.linkInText && post.link ? "Text with link" : "Caption"} is ${len} ${unit}; ${post.channel} allows ${limits.maxChars}.` });
+    f.push({ code: "length.exceeded", severity: "blocker", field: "body", message: `${linkGoesInText(post) && post.link ? "Text with link" : "Caption"} is ${len} ${unit}; ${post.channel} allows ${limits.maxChars}.` });
   }
 
   // Forbidden phrases (brand hard rule)
@@ -130,6 +130,9 @@ export function lintPost(post: PostDraft, ctx: LintContext): Finding[] {
     }
     if (!post.creative_brief) f.push({ code: "creative.brief_missing", severity: "blocker", field: "creative_brief", message: "Visual posts require a creative brief." });
   }
+
+  // Attached media against what the channel's adapter can publish
+  f.push(...lintMedia(post));
 
   // Hashtags
   const brandMax = ctx.brandMaxHashtags;
@@ -189,4 +192,42 @@ export function deriveRiskClass(post: PostDraft, findings: readonly Finding[], o
   const caption = composeCaption(post);
   if (findings.some((x) => x.severity === "warning") || OFFER_RE.test(caption) || post.claim_ids_used.length > 0) return "medium";
   return "low";
+}
+
+const fmtMB = (n: number) => `${Math.round((n / 1024 / 1024) * 10) / 10} MB`;
+
+/** Media checks: right kind for the format, and within the platform's documented limits. */
+export function lintMedia(post: Pick<PostDraft, "channel" | "format" | "media" | "alt_text">): Finding[] {
+  const f: Finding[] = [];
+  const rules = PLATFORM_LIMITS[post.channel].apiMedia;
+  const m = post.media?.[0];
+  const wantsVideo = post.format === "video" || post.format === "story";
+  const wantsImage = post.format === "image" || post.format === "carousel";
+  // A missing file isn't a lint finding: the Media section and scheduling explain what's needed.
+  if (!m) return f;
+  if (m.kind === "image" && !isVisualFormat(post.format) && !post.alt_text?.trim()) {
+    f.push({ code: "a11y.alt_text_missing", severity: "blocker", field: "alt_text", message: "Images need alt text." });
+  }
+  if (wantsVideo && m.kind !== "video") f.push({ code: "media.kind_mismatch", severity: "blocker", field: "media", message: "This is a video post but the attachment is an image." });
+  if (wantsImage && m.kind !== "image") f.push({ code: "media.kind_mismatch", severity: "blocker", field: "media", message: "This is an image post but the attachment is a video." });
+  const rule = m.kind === "image" ? rules?.image : rules?.video;
+  if (!rule) {
+    f.push({ code: "media.unsupported", severity: "warning", field: "media", message: `Publishing ${m.kind === "image" ? "images" : "videos"} to ${post.channel} isn't supported yet; use the export.` });
+    return f;
+  }
+  if (!rule.mimes.includes(m.mime)) f.push({ code: "media.format", severity: "blocker", field: "media", message: `${post.channel} accepts ${rule.mimes.map((x) => x.split("/")[1]).join(", ")}; this file is ${m.mime.split("/")[1] ?? m.mime}.` });
+  if (m.bytes > rule.maxBytes) f.push({ code: "media.too_large", severity: "blocker", field: "media", message: `The file is ${fmtMB(m.bytes)}; ${post.channel} allows up to ${fmtMB(rule.maxBytes)}.` });
+  if (m.kind === "image" && m.width && m.height) {
+    const a = m.width / m.height;
+    const ir = rule as ImageRule;
+    if ((ir.minAspect && a < ir.minAspect - 0.005) || (ir.maxAspect && a > ir.maxAspect + 0.005)) {
+      f.push({ code: "media.aspect", severity: "blocker", field: "media", message: `${post.channel} needs a shape between ${ir.minAspect ?? "any"} and ${ir.maxAspect ?? "any"} (width ÷ height); this image is ${a.toFixed(2)}.` });
+    }
+  }
+  if (m.kind === "video" && m.duration_ms !== null) {
+    const vr = rule as VideoRule;
+    if (vr.minMs && m.duration_ms < vr.minMs) f.push({ code: "media.too_short", severity: "blocker", field: "media", message: `The video is ${(m.duration_ms / 1000).toFixed(1)} s; ${post.channel} needs at least ${vr.minMs / 1000} s.` });
+    if (vr.maxMs && m.duration_ms > vr.maxMs) f.push({ code: "media.too_long", severity: "blocker", field: "media", message: `The video is ${Math.round(m.duration_ms / 1000)} s; ${post.channel} allows up to ${vr.maxMs / 1000} s.` });
+  }
+  return f;
 }

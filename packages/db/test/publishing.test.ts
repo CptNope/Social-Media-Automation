@@ -81,6 +81,15 @@ describe("publishing schema (0004)", { skip: bin ? false : "Postgres server bina
     assert.match(as("app_user", "SELECT count(*) FROM credentials;", A).err, /permission denied/);
   });
 
+  it("a media file's storage key belongs to the row's own tenant (0006)", () => {
+    const key = (t: string) => `t/${t}/${"a".repeat(32)}.jpg`;
+    const ins = (t: string, k: string) => as("app_user", `INSERT INTO assets (tenant_id, brand_id, kind, storage_key, mime, origin, sha256, bytes) VALUES ('${t}', '${t === A ? BRAND_A : BRAND_B}', 'photo', '${k}', 'image/jpeg', 'uploaded', repeat('a', 64), 10);`, t);
+    assert.match(ins(A, key(B)).err, /assets_storage_key_tenant/, "can't point at another tenant's files");
+    assert.match(ins(A, "../../etc/passwd").err, /assets_storage_key_format/);
+    assert.equal(ins(A, key(A)).ok, true);
+    assert.equal(as("app_user", "SELECT count(*) FROM assets;", B).out, "0");
+  });
+
   it("at most one live publication per post, and one connected account per channel", () => {
     const dup = as("app_user", `INSERT INTO publications (tenant_id, content_item_id, revision_id, idempotency_key, status) VALUES ('${A}', 'a2000000-0000-4000-8000-00000000000a', 'a3000000-0000-4000-8000-00000000000a', 'k2', 'queued');`, A);
     assert.equal(dup.ok, false);

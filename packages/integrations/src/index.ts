@@ -7,3 +7,7 @@ export * from "./x.ts";
 export * from "./threads.ts";
 export * from "./linkedin.ts";
 export * from "./google-business.ts";
+export * from "./instagram.ts";
+export * from "./pinterest.ts";
+export * from "./tiktok.ts";
+export * from "./youtube.ts";

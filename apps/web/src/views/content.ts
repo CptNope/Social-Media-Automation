@@ -285,6 +285,8 @@ export interface ItemPageData {
   canRecheck: boolean;
   lintNow: Finding[];
   flash?: { kind: "ok" | "error"; message: string } | undefined;
+  /** Media features on this server (null: no storage configured). */
+  media?: { canGenerate: boolean; maxUploadMb: number } | null;
   publishing?: {
     status: PublishingStatus;
     publications: PublicationRow[];
@@ -294,6 +296,47 @@ export interface ItemPageData {
     canSchedule: boolean;
     defaultAt: { date: string; time: string };
   };
+}
+
+const MB = (n: number) => `${(n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+
+function mediaPanel(shell: Shell, i: ContentItemRow, d: ItemPageData): Html {
+  const w = shell.workspace!;
+  const p = i.body as PostDraft;
+  const m = p.media?.[0];
+  const rules = PLATFORM_LIMITS[p.channel].apiMedia;
+  const visual = ["image", "video", "story", "carousel"].includes(p.format);
+  if (!m && !visual && !rules) return html``;
+  const editable = d.canEdit && ["draft", "in_review", "approved"].includes(i.state);
+  const accepts = [...(rules?.image?.mimes ?? []), ...(rules?.video?.mimes ?? [])];
+  return html`<section class="panel" id="media"><h2>Media</h2>
+${
+  m
+    ? html`<div class="media-preview">${m.kind === "image" ? html`<img src="/w/${w.id}/media/${m.asset_id}" alt="${p.alt_text ?? ""}">` : html`<video src="/w/${w.id}/media/${m.asset_id}" controls preload="metadata"></video>`}</div>
+<dl class="facts small"><dt>File</dt><dd>${m.mime.split("/")[1]?.toUpperCase()} ${m.kind}, ${MB(m.bytes)}${m.width && m.height ? `, ${m.width}×${m.height}` : ""}${m.duration_ms !== null ? `, ${(m.duration_ms / 1000).toFixed(1)} s` : ""}</dd><dt>Source</dt><dd>${m.origin === "rendered" ? "Generated from the creative brief" : "Uploaded"}</dd>${m.kind === "image" ? html`<dt>Alt text</dt><dd>${p.alt_text ?? html`<span class="finding">Missing</span>`}</dd>` : ""}</dl>
+${editable ? html`<form method="post" action="/w/${w.id}/content/${i.id}/media/remove">${csrfField(shell.csrf)}<input type="hidden" name="base_hash" value="${i.contentHash ?? ""}"><button class="secondary" type="submit">Remove</button></form>` : ""}`
+    : html`<p class="muted">${visual ? `This ${p.format} post needs ${p.format === "video" || p.format === "story" ? "a video" : "an image"} before it can be published.` : "Optional: add an image or video."}</p>`
+}
+${
+  editable && d.media
+    ? html`<div class="media-actions">
+  ${
+    d.media.canGenerate && p.creative_brief?.headline && rules?.image
+      ? html`<form method="post" action="/w/${w.id}/content/${i.id}/media/generate">${csrfField(shell.csrf)}<input type="hidden" name="base_hash" value="${i.contentHash ?? ""}"><button ${m ? html`class="secondary"` : ""} type="submit">${m ? "Replace with a generated graphic" : "Generate graphic from the brief"}</button></form>`
+      : ""
+  }
+  <form method="post" action="/w/${w.id}/content/${i.id}/media/upload" enctype="multipart/form-data" class="upload">${csrfField(shell.csrf)}<input type="hidden" name="base_hash" value="${i.contentHash ?? ""}">
+    <div class="field"><label for="mf">${m ? "Replace with your own file" : "Upload a photo or video"} <span class="hint">${accepts.length ? accepts.map((x) => x.split("/")[1]).join(", ") : "JPEG, PNG, MP4"} · up to ${d.media.maxUploadMb} MB</span></label><input id="mf" name="file" type="file" accept="${accepts.length ? accepts.join(",") : "image/*,video/*"}" required></div>
+    <div class="field"><label for="ma">Alt text <span class="hint">Describe the image for people who can't see it</span></label><input id="ma" name="alt_text" type="text" maxlength="1000" value="${p.alt_text ?? ""}"></div>
+    <button class="secondary" type="submit">Upload</button>
+  </form>
+</div>
+<p class="small muted">Changing the media saves a new version; it needs approving again.</p>`
+    : editable && !d.media
+      ? html`<p class="small muted">Media storage isn't configured on this server.</p>`
+      : ""
+}
+</section>`;
 }
 
 function publishingPanel(shell: Shell, i: ContentItemRow, pb: NonNullable<ItemPageData["publishing"]>): Html {
@@ -336,7 +379,7 @@ ${
     ? html`<table><thead><tr><th>Attempt</th><th>Status</th><th>Details</th></tr></thead><tbody>
 ${pb.publications.map(
   (p) => html`<tr><td class="small">${when(p.publishedAt ?? p.scheduledFor ?? p.createdAt)}</td><td>${pubTag(p.status)}</td>
-  <td class="small">${p.permalink && /^https:\/\//.test(p.permalink) ? html`<a href="${p.permalink}" rel="noopener noreferrer" target="_blank">View post</a>` : ""}${p.lastError ? html`<div class="muted">${p.lastError}</div>` : ""}${p.attempts > 1 ? html`<div class="muted">${p.attempts} attempts</div>` : ""}</td></tr>`,
+  <td class="small">${p.permalink && /^https:\/\//.test(p.permalink) ? html`<a href="${p.permalink}" rel="noopener noreferrer" target="_blank">View post</a>` : ""}${p.note ? html`<div>${p.note}</div>` : ""}${p.lastError ? html`<div class="muted">${p.lastError}</div>` : ""}${p.attempts > 1 ? html`<div class="muted">${p.attempts} attempts</div>` : ""}</td></tr>`,
 )}</tbody></table>`
     : ""
 }
@@ -419,6 +462,7 @@ ${
     i.state === "draft" && blockers ? `Fix ${blockers} issue${blockers === 1 ? "" : "s"} marked "Must fix" before sending for approval.` : i.state === "in_review" && !d.canApprove ? `Waiting for ${d.approverLabel}.` : i.state === "approved" ? "Approved. Schedule it below, or use the CSV export to post it by hand." : ""
   }</span>
 </div>
+${mediaPanel(shell, i, d)}
 ${d.publishing ? publishingPanel(shell, i, d.publishing) : ""}
 ${
   d.approvals.length

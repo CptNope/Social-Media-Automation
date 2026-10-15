@@ -61,6 +61,8 @@ export interface RouteKit {
   content: ContentJobDeps;
   /** Publishing status for the post page (null: publishing not configured on this server). */
   publishing: { mode: "live" | "dry_run" } | null;
+  /** Media features for the post page (null: no media storage). */
+  media: { canGenerate: boolean; maxUploadMb: number } | null;
 }
 
 const TZ = DEFAULT_TIMEZONE;
@@ -106,6 +108,28 @@ export async function machineState(tx: QueryClient, item: ContentItemRow): Promi
     approvedHash: latest?.decision === "approved" && ["approved", "scheduled", "publishing", "failed"].includes(item.state) ? latest.contentHash : null,
     pausedFrom: item.pausedFrom,
   };
+}
+
+/**
+ * Save a changed post as a new version: validate, re-run the checks, keep the AI reviewer's risk
+ * (an edit never lowers it), drop any approval (back to draft) and audit — all in the caller's
+ * transaction with the item already locked. Used by text edits and by media changes.
+ */
+export async function reviseItem(q: QueryClient, ctx: Pick<RouteCtx, "tenantId" | "s">, item: ContentItemRow, candidate: unknown, action: string, detail: Record<string, unknown> = {}): Promise<"ok" | "unchanged"> {
+  const parsed = PostDraftSchema.safeParse(candidate);
+  if (!parsed.success) throw new HttpError(400, `Couldn't save: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  const prev = item.body as PostDraft;
+  const post = parsed.data;
+  const hash = contentHash(post);
+  if (hash === item.contentHash) return "unchanged";
+  const ctxBrand = await loadBrandContext(q, item.brandId);
+  const lint = [...lintForBrand(post, ctxBrand, (await recentHooks(q, item.brandId)).filter((h) => h !== prev.hook && h !== post.hook)), ...carriedAiFindings(item.findings as never)];
+  const risk = deriveRiskClass(post, lint);
+  const { next, audit } = transition(await machineState(q, item), { type: "edit", newContentHash: hash }, { type: "user", id: ctx.s.userId });
+  await addRevision(q, { tenantId: ctx.tenantId, itemId: item.id, body: post, contentHash: hash, findings: lint, review: item.review, createdBy: `user:${ctx.s.userId}`, riskClass: combinedRisk(risk, item.riskClass ?? "low") });
+  await setContentState(q, item.id, next.state, next.pausedFrom);
+  await appendAudit(q, ctx.tenantId, { actorType: "user", actorId: ctx.s.userId, action, entityType: "content_item", entityId: item.id, before: { hash: item.contentHash, state: item.state }, after: { ...audit.after, hash, ...detail } });
+  return "ok";
 }
 
 const SENSITIVE_CLAIM_CATEGORIES = new Set(["testimonial", "statistic", "award"]);
@@ -364,6 +388,7 @@ export function registerContentRoutes(kit: RouteKit): void {
         canExport: MANAGE.includes(ctx.role),
         lintNow: [],
         canRecheck: EDIT.includes(ctx.role) && !!kit.content.ai,
+        media: kit.media,
         publishing: {
           status: { configured: !!kit.publishing, mode: kit.publishing?.mode ?? "dry_run", tenantPublishingEnabled: d.tenant.publishingEnabled, tenantPausedAt: d.tenant.pausedAt, globalPaused: d.global.paused },
           publications: d.publications,
@@ -423,20 +448,10 @@ export function registerContentRoutes(kit: RouteKit): void {
         body: (req.form.get("body") ?? "").trim(),
         cta: (req.form.get("cta") ?? "").trim(),
         hashtags: (req.form.get("hashtags") ?? "").split(/[\s,]+/).map((h) => h.replace(/^#/, "")).filter(Boolean).slice(0, 30),
-        ...(prev.creative_brief ? { alt_text: (req.form.get("alt_text") ?? "").trim() || null } : {}),
+        ...(prev.creative_brief || prev.media?.length ? { alt_text: (req.form.get("alt_text") ?? "").trim() || null } : {}),
       };
-      const parsed = PostDraftSchema.safeParse(candidate);
-      if (!parsed.success) throw new HttpError(400, `Couldn't save: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
-      const post = parsed.data;
-      const hash = contentHash(post);
-      if (hash === item.contentHash) return "unchanged" as const;
-      const ctxBrand = await loadBrandContext(q, item.brandId);
-      const lint = [...lintForBrand(post, ctxBrand, (await recentHooks(q, item.brandId)).filter((h) => h !== prev.hook && h !== post.hook)), ...carriedAiFindings(item.findings as never)];
-      const risk = deriveRiskClass(post, lint);
-      const { next, audit } = transition(await machineState(q, item), { type: "edit", newContentHash: hash }, { type: "user", id: ctx.s.userId });
-      await addRevision(q, { tenantId: ctx.tenantId, itemId, body: post, contentHash: hash, findings: lint, review: item.review, createdBy: `user:${ctx.s.userId}`, riskClass: combinedRisk(risk, item.riskClass ?? "low") }); // edits never lower the AI reviewer's risk
-      await setContentState(q, itemId, next.state, next.pausedFrom);
-      await appendAudit(q, ctx.tenantId, { actorType: "user", actorId: ctx.s.userId, action: "content.edited", entityType: "content_item", entityId: itemId, before: { hash: item.contentHash, state: item.state }, after: { ...audit.after, hash } });
+      const r = await reviseItem(q, ctx, item, candidate, "content.edited");
+      if (r !== "ok") return r;
       return "ok" as const;
     });
     return redirect(`/w/${ctx.tenantId}/content/${itemId}?m=${result === "ok" ? "edited" : result === "unchanged" ? "unchanged" : "stale"}`);

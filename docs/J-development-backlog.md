@@ -61,8 +61,8 @@ Each item is written to be pasted into a GitHub Issue or given to Claude Code. `
 - [x] ✅ **WP-1** JAT Connector plugin: Application Password + HMAC signature (timestamp, single-use nonce), `/jat/v1/health`, `/posts` draft/schedule; only signed input is read. PHP unit tests + cross-language signature test. *Not yet run on a live WordPress site.*
 - [~] **WP-2** SEO meta read/update for Yoast, Rank Math, AIOSEO with change log + rollback in the plugin; client in `packages/integrations`. *Remaining:* meta keys UNVERIFIED on live sites; `wp_changes` mirror; UI.
 - [ ] **WP-3** Docker test matrix (WordPress + each SEO plugin) in CI.
-- [~] **ADP-1** Facebook Pages adapter: OAuth (state bound to browser + user, single use), long-lived token → Page tokens kept server-side, Page picker, publish text + link with `appsecret_proof`, delete, error classification. *Remaining:* live test with a JAT-owned Page (needs Meta App Review, SETUP-1); images; insights.
-- [~] **ADP-2** Bluesky adapter: app password, session cache (bounded, keyed by password), PDS from DID document over the SSRF-safe client, link cards, delete. *Remaining:* live test; images; link facets in text.
+- [~] **ADP-1** Facebook Pages adapter: OAuth (state bound to browser + user, single use), long-lived token → Page tokens kept server-side, Page picker, publish text + link with `appsecret_proof`, delete, error classification. Photo posts (multipart upload). *Remaining:* live test with a JAT-owned Page (needs Meta App Review, SETUP-1); video; insights.
+- [~] **ADP-2** Bluesky adapter: app password, session cache (bounded, keyed by password), PDS from DID document over the SSRF-safe client, link cards, delete. Images (blob upload with alt text) and link facets. *Remaining:* live test; video.
 - [~] **ADP-3** CSV export + "mark as posted" (also for failed sends that did go out). *Remaining:* ZIP with images (after CRE-1).
 - [~] **INT-1** Connections page: connect/test/pause/disconnect for Bluesky, Facebook, WordPress; recent publishing with failures; connection checks queued to the worker when the web process can't read credentials. *Remaining:* scheduled token-health job; Facebook token expiry warnings.
 - [~] **ADP-4** Google Business Profile adapter: Google OAuth (PKCE, offline), location picker across accounts, STANDARD local posts with a Learn more button, token refresh before sending. *Remaining:* live test (needs API access approval); EVENT/OFFER posts; photos.
@@ -72,13 +72,17 @@ Each item is written to be pasted into a GitHub Issue or given to Claude Code. `
 - [x] ✅ **INT-2** Shared OAuth connect flow (state bound to browser, user and channel; PKCE verifier server-side) and token refresh serialized per connection, with failed renewals deferring the post instead of cancelling it.
 - [ ] **INT-3** Durable background refresh state (failed renewals back off in memory today) and alerting when a connection needs reconnecting.
 - [ ] **VAULT-2** KMS-backed `KekProvider` (AWS KMS or GCP KMS); production refuses the local KEK today.
-- [ ] **PUB-3** Image posts (needs CRE-1 renderer); today visual-format posts can't be scheduled and are exported instead.
+- [x] ✅ **PUB-3** Image and video posts: one file per post, part of the approved content (SHA-256 re-checked at send time, a changed file is never sent), per-channel format/size/aspect/duration lint, uploads streamed to disk and identified from their bytes, Range-capable preview, storage in Cloudflare R2 (hand-written SigV4, private bucket, 1-hour presigned links) or a local folder with HMAC-signed links. *Remaining:* carousels; stories; orphaned files cleanup; per-user upload limits.
+- [~] **ADP-8** Instagram adapter (Facebook Login): professional accounts via Pages, photo containers by presigned URL with alt text, Reels by resumable upload, status polling, two-step publish, delete. *Remaining:* live test (Meta review); whether presigned URLs are accepted (UNVERIFIED); carousels and stories.
+- [~] **ADP-9** Pinterest adapter: board picker, continuous refresh tokens kept alive, image pins (base64) and video pins (register → upload → poll). *Remaining:* live test (Standard access); base64 size limit UNVERIFIED.
+- [~] **ADP-10** TikTok adapter: uploads to the creator's drafts (inbox) in chunks, rotating refresh tokens, success with a note even if the final status check fails. *Remaining:* live test (app review); Direct Post needs TikTok's audit and its required UX (privacy picker, disclosures).
+- [~] **ADP-11** YouTube adapter: resumable upload with an interruption check (never uploads twice), title/description from the post, reports forced-private uploads, quota errors wait. *Remaining:* live test; `selfDeclaredMadeForKids` choice in the UI; title over 100 characters is cut rather than flagged by lint.
 - [ ] **PUB-4** Multi-replica web: Facebook OAuth state and Page picks live in process memory (single web replica only); move to the database or a signed, encrypted cookie.
 - [ ] **PUB-5** Plugin hardening: atomic nonce store; lock around the SEO change log.
 - [ ] **TZ-2** Scheduling UI uses US Eastern (with TZ-1).
 
 ## Phase 5 — Creative, SEO, reporting
-- [ ] **CRE-1** HTML template renderer (Playwright) with brand tokens; 1:1, 4:5, 9:16, 1.91:1 crops.
+- [~] **CRE-1** HTML template renderer (Playwright/Chromium, scripts off, network blocked) with brand colours and fonts at each channel's size (Instagram 4:5, Pinterest 2:3, Facebook 1:1, Bluesky 1:1). *Remaining:* more layouts; 9:16 and 1.91:1 crops; logo; render in the worker instead of the web request.
 - [ ] **SEO-1** Site crawler (≤200 pages) + CrUX + PSI + GSC connectors; `seo-page-audit` interpretation.
 - [ ] **RPT-1** Monthly report generator (web + PDF export), "not available" metric handling.
 

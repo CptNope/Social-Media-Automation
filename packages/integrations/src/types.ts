@@ -30,11 +30,33 @@ export interface PublishablePost {
   link: { url: string; title: string; description: string } | null;
   /** Stable id used for platform-side idempotency where supported. */
   idempotencyKey: string;
+  /** The approved image or video, if any. */
+  media?: PublishableMedia | null;
+  /** Short title where the platform has one (YouTube, Pinterest): the approved hook. */
+  title?: string;
+}
+
+/** An approved media file. Loaded lazily, so adapters only fetch what they need. */
+export interface PublishableMedia {
+  kind: "image" | "video";
+  mime: string;
+  size: number;
+  width: number | null;
+  height: number | null;
+  durationMs: number | null;
+  altText: string | null;
+  /** SHA-256 recorded at approval; `bytes()` verifies the file still matches it. */
+  sha256: string;
+  bytes(): Promise<Buffer>;
+  /** A URL the platform can fetch for a limited time (platforms that only accept URLs). */
+  publicUrl(): Promise<string>;
 }
 
 export interface PublishResult {
   externalId: string;
   permalink: string | null;
+  /** Something the person needs to know (e.g. "sent to TikTok drafts; finish posting in the app"). */
+  note?: string;
 }
 
 export interface ChannelAdapter<Cred> {

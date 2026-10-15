@@ -2,7 +2,7 @@
 
 An AI-powered, brand-aware marketing automation platform by **Jeremy Anderson Tech**. It learns a business's brand and verified facts once (Brand DNA + Claim Registry), then plans, drafts, quality-checks, schedules, publishes and reports on marketing across websites and social channels — with human approval wherever there's risk.
 
-> **Status:** Phases 1–4 built: foundation, AI layer, Brand DNA onboarding, planning calendar, AI drafting with checks, approvals, CSV export, and publishing (scheduling, the publisher with its safety checks, pause switches, a Connections page with Facebook Pages, Google Business Profile, LinkedIn, Threads, X, Bluesky and the WordPress connector plugin). Everything is tested against real Postgres with mocked platforms: **nothing has been sent to a live account on any platform yet**, and the AI and crawler have not called the live Claude API or crawled a real site. Publishing stays in dry-run until both `PUBLISH_MODE=live` and a per-client admin switch are set. No integration is claimed to work until its adapter passes staging tests.
+> **Status:** Phases 1–4 built: foundation, AI layer, Brand DNA onboarding, planning calendar, AI drafting with checks, approvals, CSV export, and publishing (scheduling, the publisher with its safety checks, pause switches, a Connections page with Facebook Pages, Instagram, Google Business Profile, LinkedIn, Threads, X, Pinterest, TikTok, YouTube, Bluesky and the WordPress connector plugin), and media: uploaded photos and videos or branded graphics rendered from the creative brief. Everything is tested against real Postgres with mocked platforms: **nothing has been sent to a live account on any platform yet**, and the AI and crawler have not called the live Claude API or crawled a real site. Publishing stays in dry-run until both `PUBLISH_MODE=live` and a per-client admin switch are set. No integration is claimed to work until its adapter passes staging tests.
 
 ## Planning documents
 
@@ -59,7 +59,7 @@ flowchart LR
     G -->|approved| H["Schedule"]
     G -->|approved| X["CSV export<br/>(post by hand)"]
     H --> I["Publisher re-checks<br/>at send time"]
-    I -->|live| J["Facebook · LinkedIn · Google Business Profile<br/>Threads · X · Bluesky"]
+    I -->|live| J["Facebook · Instagram · LinkedIn · Google Business Profile<br/>Threads · X · Pinterest · TikTok · YouTube · Bluesky"]
     I -->|dry run or blocked| G2["Back to approved,<br/>reason shown"]
 ```
 
@@ -87,7 +87,7 @@ flowchart TB
     P --> CR
     W -->|plan, draft, review| AI["Claude API"]
     W -->|crawl| SITE["Client website"]
-    P -->|"publish, renew tokens"| PLAT["Facebook · LinkedIn · Google Business Profile<br/>Threads · X · Bluesky · WordPress plugin"]
+    P -->|"publish, renew tokens"| PLAT["Facebook · Instagram · LinkedIn · Google Business Profile<br/>Threads · X · Pinterest · TikTok · YouTube<br/>Bluesky · WordPress plugin"]
 ```
 
 | Package | What it does |
@@ -97,7 +97,8 @@ flowchart TB
 | `packages/vault` | Envelope encryption for platform credentials |
 | `packages/ai` | Claude client, structured outputs, budget guard, agents |
 | `packages/ingest` | Website crawler and the SSRF-safe fetch client |
-| `packages/integrations` | Platform clients: Facebook Pages, Google Business Profile, LinkedIn, Threads, X, Bluesky, WordPress |
+| `packages/integrations` | Platform clients: Facebook Pages, Instagram, Google Business Profile, LinkedIn, Threads, X, Pinterest, TikTok, YouTube, Bluesky, WordPress |
+| `packages/media` | Media storage (Cloudflare R2 or a local folder), file checks from the bytes themselves, and the branded-graphics renderer |
 | `apps/web` | Dashboard, background jobs and the publisher |
 | `wordpress-plugin/jat-connector` | WordPress plugin for drafts and SEO changes |
 
@@ -200,7 +201,7 @@ sequenceDiagram
     participant G as Publish gate
     participant A as Platform API
     D->>DB: find due posts (ids + times only)
-    opt access token expires soon (X, Google, Threads)
+    opt access token expires soon (X, Google, Threads, Pinterest, TikTok)
         D->>A: renew the token (one worker at a time per account)
         D->>DB: store the new token, encrypted
     end
@@ -306,8 +307,14 @@ Environment variables (see `.env.example`):
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | both | for Google Business Profile | |
 | `THREADS_APP_ID`, `THREADS_APP_SECRET`, `THREADS_GRAPH_HOST` | both | for Threads | Host defaults to `graph.threads.net` |
 | `X_CLIENT_ID`, `X_CLIENT_SECRET` | both | for X | |
+| `PINTEREST_CLIENT_ID`, `PINTEREST_CLIENT_SECRET`, `PINTEREST_API_HOST` | both | for Pinterest | Use `api-sandbox.pinterest.com` for trial apps |
+| `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET` | both | for TikTok | |
+| `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_JURISDICTION` | both | for media (production) | An R2 API token scoped to one private bucket, Object Read & Write |
+| `LOCAL_MEDIA_DIR`, `MEDIA_SIGNING_SECRET` | both | for media (development) | Stores files in a folder; signed links are served at `/media/signed/...` |
+| `MAX_UPLOAD_MB` | web | no | Upload cap, 1–4096 (default 250) |
+| `GRAPHICS_RENDERER`, `PLAYWRIGHT_MODULE` | web | for graphics | `chromium` turns on **Generate graphic**; needs Playwright and Chromium installed |
 
-Each platform's redirect URI is `{BASE_URL}/oauth/{channel}/callback`, where channel is `facebook`, `linkedin`, `google_business_profile`, `threads` or `x`. A platform without credentials shows "not configured" on the Connections page.
+Instagram uses the Facebook app and YouTube the Google client. Each platform's redirect URI is `{BASE_URL}/oauth/{channel}/callback`, where channel is `facebook`, `instagram`, `linkedin`, `google_business_profile`, `youtube`, `threads`, `x`, `pinterest` or `tiktok`. A platform without credentials shows "not configured" on the Connections page.
 | `TRUSTED_PROXIES` | web | no | Number of reverse proxies, for client IPs |
 
 Not ready yet for production: sign-in email delivery (AUTH-2), the KMS key provider (VAULT-2), and live tests against each platform. See the [backlog](docs/J-development-backlog.md).
@@ -321,6 +328,10 @@ Not ready yet for production: sign-in email delivery (AUTH-2), the KMS key provi
 | LinkedIn | Community Management API access (Development, then Standard tier); Super admin or Content admin on the Company Page | **60 days, then reconnect** (the Connections page warns 14 days ahead) | Free |
 | Threads | A Meta app with `threads_basic`, `threads_content_publish`, `threads_delete` | Renewed automatically, in the background | Free |
 | X | An X developer app (OAuth 2.0, confidential client) with prepaid API credits | Renewed automatically | **$0.015 per post, $0.20 if it contains a link**, charged to the app's credits |
+| Instagram | The same Meta app, plus `instagram_basic`, `instagram_content_publish`, `instagram_manage_contents`; a professional account linked to a Facebook Page | Until revoked | Free |
+| Pinterest | A Pinterest app with Standard access (trial apps post to the sandbox only); pick a board | Renewed automatically, in the background | Free |
+| TikTok | A TikTok developer app with `video.upload` (Content Posting API) | Renewed automatically (refresh lasts a year) | Free |
+| YouTube | The Google project with YouTube Data API v3 and `youtube.upload` | Renewed automatically | Free; 100 uploads a day per project |
 | Bluesky | Handle + an app password (Settings → Privacy and security → App passwords) | Until revoked | Free |
 | WordPress | The JAT Connector plugin, a dedicated user and its Application Password | Until revoked | Free |
 
@@ -336,8 +347,34 @@ What each platform receives:
 | Threads | 500 characters | A link attachment |
 | X | 280 weighted characters (links count 23, emoji 2) | Part of the text |
 | Bluesky | 300 graphemes | A link card |
+| Instagram | 2,200 characters | Text only (links aren't clickable in captions) |
+| Pinterest | Title 100, description 500 | The pin's destination link |
+| TikTok | Caption is added by the creator in TikTok | Not sent |
+| YouTube | Title 100, description 5,000 bytes | Part of the description |
 
-Image and video posts (and so Instagram, TikTok, Pinterest and YouTube) come with the graphics renderer; until then those posts use the CSV export.
+### Media
+
+Each post can carry one photo or video. Open the post, then in **Media** either upload a file or click **Generate graphic** to render the creative brief's headline in the brand's colours and fonts at the right size for the channel. Attaching or removing media creates a new version, so the post needs approving again, and the approval covers the exact file (its SHA-256 is part of the approved content).
+
+```mermaid
+flowchart LR
+    U["Upload (multipart,<br/>streamed to disk)"] --> P["Check the bytes:<br/>type, size, duration"]
+    G["Generate graphic<br/>(Chromium, no scripts,<br/>no network)"] --> P
+    P --> S[("Private storage<br/>R2 or local folder")]
+    S --> V["New version<br/>→ approve again"]
+    V --> X["At send time: file re-hashed;<br/>a changed file is never sent"]
+```
+
+| Channel | Photos | Videos | How the file gets there |
+|---|---|---|---|
+| Facebook | JPEG, PNG up to 10 MB | — | Uploaded with the post |
+| Bluesky | JPEG, PNG, WebP up to 1,000,000 bytes | — | Uploaded with the post |
+| Instagram | JPEG up to 8 MB, aspect 4:5 – 1.91:1 | MP4, MOV up to 300 MB, 3 s – 15 min (as a Reel) | Photos by a 1-hour private link; videos uploaded |
+| Pinterest | JPEG, PNG up to 20 MB | MP4, MOV up to 1 GB | Uploaded |
+| TikTok | — | MP4, MOV, WebM up to 4 GB, 1 s – 10 min | Uploaded to the creator's **drafts**; they add the caption and post in the TikTok app |
+| YouTube | — | Up to 4 GB | Resumable upload; an interrupted upload is checked, never sent twice |
+
+The checks run before scheduling, so a file a platform would refuse shows up as a lint finding on the post. Stories, carousels and video scripts still use the CSV export. Files are identified from their content, not their name: HEIC/AVIF photos and audio files are refused.
 
 ## Troubleshooting
 
@@ -346,7 +383,12 @@ Image and video posts (and so Instagram, TikTok, Pinterest and YouTube) come wit
 | Database tests are skipped | Postgres binaries not found | Set `PG_BIN` to the folder containing `initdb` |
 | `initdb` refuses to run as root | Postgres safety check | The test harness uses `runuser -u postgres` automatically when run as root |
 | Post page says "Dry run (not sent)" | `PUBLISH_MODE` isn't `live`, or the client isn't enabled | See "Turning on live publishing" |
-| Can't schedule a post | Image posts aren't supported yet, the channel has no adapter, or the account isn't connected | Use the CSV export, or fix the connection |
+| Can't schedule a post | No media attached for a visual post, a format the channel doesn't take (story, carousel), or the account isn't connected | Attach the file in **Media**, use the CSV export, or fix the connection |
+| Upload refused with 415 | The file isn't a JPEG, PNG, WebP, MP4, MOV or WebM (judged from its bytes) | Convert it, e.g. HEIC → JPEG |
+| Upload refused with 413 or 503 | Bigger than `MAX_UPLOAD_MB`, or four uploads already running | Shrink the file or raise the cap; try again in a minute |
+| **Generate graphic** is missing | `GRAPHICS_RENDERER=chromium` isn't set or Playwright can't start Chromium | Install Playwright and Chromium, set the variable |
+| TikTok post says "Sent to drafts" | TikTok uploads go to the creator's drafts | Open TikTok, add the caption and post it |
+| YouTube video went out private | Google restricts uploads from unverified API projects | Have the project audited, then change the privacy in YouTube Studio |
 | "Reconnect needed" | The platform rejected the stored sign-in, refused to renew it, or (LinkedIn) the 60 days ran out | Reconnect the account on Connections, then **Retry now** |
 | A platform says "not configured" | Its app credentials aren't set | Set the variables in the table above and restart |
 | App refuses to start in production | `JAT_PROCESS` not set, or `LOCAL_KEK_BASE64` used | Run separate `web` and `worker` processes; a KMS provider is required |

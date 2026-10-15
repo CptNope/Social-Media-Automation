@@ -200,7 +200,7 @@ describe("more platforms: Google Business Profile, LinkedIn, Threads and X end t
       google_business_profile: new GoogleBusinessAdapter({ clientId: "gid", clientSecret: "gsecret", redirectUri: cb("google_business_profile") }, fake.fetch),
     };
     const bluesky = new BlueskyAdapter(fake.fetch);
-    deps = { publisherDb, keks: kek, activeKek: kek, mode: "live", adapters: { bluesky, ...oauth }, safeFetch: fake.fetch, log: (m, e) => errors.push([m, e]) };
+    deps = { publisherDb, keks: kek, activeKek: kek, media: null, mode: "live", adapters: { bluesky, ...oauth }, safeFetch: fake.fetch, log: (m, e) => errors.push([m, e]) };
     const publishing: PublishingConfig = { mode: "live", activeKek: kek, bluesky, oauth, publisher: deps };
     const handler = createApp({ db, sessionSecret: randomBytes(32), baseUrl: base, mailer, jobs, log: (m, e) => errors.push([m, e]), onboarding: { crawl: async () => assert.fail("not used"), extract: null }, contentAi: null, publishing });
     server.on("request", (req, res) => void handler(req, res));

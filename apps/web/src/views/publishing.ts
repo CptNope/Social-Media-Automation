@@ -58,12 +58,18 @@ interface Connectable {
 const CONNECTABLE: Connectable[] = [
   { channel: "facebook", blurb: "Posts to a Facebook Page you manage. You'll sign in with Facebook and pick the Page.", env: "FACEBOOK_APP_ID / FACEBOOK_APP_SECRET" },
   { channel: "google_business_profile", blurb: "Posts updates to a Business Profile location (Google Search and Maps). You'll sign in with Google and pick the location.", env: "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET", note: "Google reviews posts after publishing; a post can show as pending for a while." },
+  { channel: "instagram", blurb: "Posts photos and Reels to an Instagram professional account linked to a Facebook Page. You'll sign in with Facebook.", env: "FACEBOOK_APP_ID / FACEBOOK_APP_SECRET", note: "Images must be JPEG and between portrait 4:5 and landscape 1.91:1. Links in Instagram captions aren't clickable." },
   { channel: "linkedin", blurb: "Posts to a LinkedIn Company Page where you're a Super admin or Content admin.", env: "LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET", note: "LinkedIn access lasts 60 days and can't be renewed automatically: reconnect before it expires." },
   { channel: "threads", blurb: "Posts text and links to a Threads profile. You'll sign in with Threads.", env: "THREADS_APP_ID / THREADS_APP_SECRET" },
   { channel: "x", blurb: "Posts to an X account. Links go inside the post text.", env: "X_CLIENT_ID / X_CLIENT_SECRET", note: "X charges per post from the account's API credits: about $0.015 per post, $0.20 if it contains a link." },
+  { channel: "pinterest", blurb: "Creates pins on a board you choose (images or videos), linking back to your site.", env: "PINTEREST_CLIENT_ID / PINTEREST_CLIENT_SECRET", note: "Until Pinterest grants Standard access, pins go to Pinterest's sandbox and only you can see them." },
+  { channel: "tiktok", blurb: "Sends videos to the TikTok app's drafts, where the account owner adds the caption and posts.", env: "TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET", note: "TikTok allows up to 5 videos waiting in drafts at once." },
+  { channel: "youtube", blurb: "Uploads videos to a YouTube channel. Vertical videos up to 3 minutes appear as Shorts.", env: "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET", note: "YouTube allows 100 uploads a day per server by default. Remove videos in YouTube Studio." },
   { channel: "bluesky", blurb: "Posts with an app password (Bluesky → Settings → Privacy and security → App passwords). Never use your main password." },
   { channel: "wordpress", blurb: "Connects the JAT Connector plugin for SEO changes and blog drafts. Needs a WordPress application password." },
 ];
+/** Which sign-in a channel uses, when it isn't the channel's own name. */
+const SIGN_IN_WITH: Record<string, string> = { instagram: "Facebook", google_business_profile: "Google", youtube: "Google" };
 /** Channels whose access can't be renewed without the person (warn before it runs out). */
 const MANUAL_RENEWAL = new Set(["linkedin"]);
 const DAY_MS = 86_400_000;
@@ -130,7 +136,7 @@ function connectForm(shell: Shell, tenantId: string, channel: string, connected:
   const name = CHANNEL_LABELS[channel] ?? channel;
   if (env) {
     if (!configured) return html`<p class="small muted">${name} isn't configured on this server (${env}).</p>`;
-    return html`<form method="post" action="/w/${tenantId}/connections/${channel}/start">${csrfField(shell.csrf)}<button ${connected ? html`class="secondary"` : ""} type="submit">${connected ? "Reconnect or switch" : `Connect with ${name === "Google Business Profile" ? "Google" : name}`}</button></form>`;
+    return html`<form method="post" action="/w/${tenantId}/connections/${channel}/start">${csrfField(shell.csrf)}<button ${connected ? html`class="secondary"` : ""} type="submit">${connected ? "Reconnect or switch" : `Connect with ${SIGN_IN_WITH[channel] ?? name}`}</button></form>`;
   }
   if (channel === "bluesky") {
     return html`<details class="inline-details" ${connected ? "" : html`open`}><summary class="button ${connected ? "secondary" : ""}">${label}</summary>

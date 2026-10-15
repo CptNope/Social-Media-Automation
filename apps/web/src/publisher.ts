@@ -1,4 +1,6 @@
-import { composeCaption, contentHash, evaluatePublishGate, isVisualFormat, transition, type ContentEvent, type PostDraft } from "@jat/core";
+import { createHash } from "node:crypto";
+import { PLATFORM_LIMITS, composeCaption, contentHash, evaluatePublishGate, isVisualFormat, transition, type ContentEvent, type PostDraft, type PostMedia } from "@jat/core";
+import type { MediaStore } from "@jat/media";
 import {
   appendAudit,
   clearCheckRequest,
@@ -11,6 +13,7 @@ import {
   inTenant,
   listApprovals,
   findExpiringTokens,
+  getAsset,
   lockContentItem,
   lockIntegration,
   lockPublication,
@@ -26,7 +29,7 @@ import {
   type IntegrationRow,
   type QueryClient,
 } from "@jat/db";
-import { PublishError, WordPressClient, type ChannelAdapter, type PublishablePost, type WordPressCredential } from "@jat/integrations";
+import { PublishError, WordPressClient, type ChannelAdapter, type PublishableMedia, type PublishablePost, type WordPressCredential } from "@jat/integrations";
 import { decryptSecret, encryptSecret, type KekProvider } from "@jat/vault";
 import { carriedAiFindings, lintForBrand, loadBrandContext } from "./content-jobs.ts";
 
@@ -46,7 +49,7 @@ import { carriedAiFindings, lintForBrand, loadBrandContext } from "./content-job
  * have posted ("ambiguous") stops and asks a person to check.
  */
 
-export const PUBLISHABLE_CHANNELS = ["facebook", "bluesky", "linkedin", "threads", "x", "google_business_profile"] as const;
+export const PUBLISHABLE_CHANNELS = ["facebook", "bluesky", "linkedin", "threads", "x", "google_business_profile", "instagram", "pinterest", "tiktok", "youtube"] as const;
 export type PublishableChannel = (typeof PUBLISHABLE_CHANNELS)[number];
 export const isPublishableChannel = (c: string): c is PublishableChannel => (PUBLISHABLE_CHANNELS as readonly string[]).includes(c);
 
@@ -55,6 +58,7 @@ export const MAX_ATTEMPTS = 5;
 export const PAUSE_STALE_MS = 24 * 60 * 60 * 1000;
 export const PAUSE_RECHECK_MS = 5 * 60 * 1000;
 const STRANDED_MS = 15 * 60 * 1000;
+const HEARTBEAT_MS = 60_000;
 const DISPATCH_CONCURRENCY = 4;
 
 export interface PublisherDeps {
@@ -68,6 +72,8 @@ export interface PublisherDeps {
   mode: "live" | "dry_run";
   /** Adapters for the channels configured on this server (missing → that channel can't send). */
   adapters: Partial<Record<PublishableChannel, ChannelAdapter<any>>>;
+  /** Where approved media files live (null: posts with media can't be sent). */
+  media: MediaStore | null;
   /** SSRF-safe fetch for customer-supplied hosts (WordPress sites). */
   safeFetch: typeof fetch;
   now?: () => Date;
@@ -75,13 +81,45 @@ export interface PublisherDeps {
 }
 
 const SYSTEM = { type: "system" as const, id: "publisher" };
+const CHANNEL_NAMES: Record<string, string> = { facebook: "Facebook", bluesky: "Bluesky", linkedin: "LinkedIn", threads: "Threads", x: "X", google_business_profile: "Google Business Profile", instagram: "Instagram", pinterest: "Pinterest", tiktok: "TikTok", youtube: "YouTube" };
 
 /** Text sent to the platform: the approved caption exactly, plus a link card. */
-export function publishablePost(post: PostDraft, idempotencyKey: string): PublishablePost {
+export function publishablePost(post: PostDraft, idempotencyKey: string, media: PublishableMedia | null = null): PublishablePost {
   return {
     text: composeCaption(post),
     link: post.link ? { url: post.link.url, title: post.hook.slice(0, 300), description: post.body.slice(0, 300) } : null,
     idempotencyKey,
+    title: post.hook,
+    media,
+  };
+}
+
+/** The approved file, loaded only if the adapter asks; the bytes must still match the approved SHA-256. */
+export function publishableMedia(store: MediaStore, key: string, m: PostMedia, altText: string | null): PublishableMedia {
+  let cached: Promise<Buffer> | null = null;
+  const verified = () =>
+    (cached ??= store.get(key).then((b) => {
+      if (createHash("sha256").update(b).digest("hex") !== m.sha256) throw new PublishError("permanent", "The stored file no longer matches the approved one; attach it again and re-approve.");
+      return b;
+    }, (err: unknown) => {
+      // Storage trouble happens before anything reaches the platform, so it's safe to retry.
+      throw new PublishError("transient", `Couldn't read the media file from storage: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500));
+    }));
+  return {
+    kind: m.kind,
+    mime: m.mime,
+    size: m.bytes,
+    width: m.width,
+    height: m.height,
+    durationMs: m.duration_ms,
+    altText,
+    sha256: m.sha256,
+    bytes: verified,
+    // Platforms that fetch by URL get one only after the stored file is checked against the approval.
+    publicUrl: async () => {
+      await verified();
+      return store.signedGetUrl(key, 3600);
+    },
   };
 }
 
@@ -89,7 +127,15 @@ export function publishablePost(post: PostDraft, idempotencyKey: string): Publis
 export function publishBlocker(item: Pick<ContentItemRow, "channel" | "body">, integration: Pick<IntegrationRow, "status"> | null): string | null {
   if (!isPublishableChannel(item.channel)) return "Automatic publishing isn't available for this channel yet. Use the CSV export and mark it as posted.";
   const post = item.body as PostDraft | null;
-  if (post && isVisualFormat(post.format)) return "This post is designed around an image, and image publishing arrives with the graphics renderer. Export it, or ask for a text version.";
+  if (post) {
+    const limits = PLATFORM_LIMITS[item.channel];
+    const media = post.media?.[0];
+    const wantsVideo = post.format === "video" || post.format === "story";
+    if (post.format === "carousel" || post.format === "video_script") return "Carousels and video scripts can't be published automatically yet. Export it instead.";
+    if (post.format === "story") return "Stories can't be published automatically yet (they'd go out as a regular post). Export it instead, or change the format.";
+    if (!media && (isVisualFormat(post.format) || !limits.formats.includes("text"))) return `Add the ${wantsVideo ? "video" : "image"} in the Media section first. The post then needs approving again.`;
+    if (media && !limits.apiMedia?.[media.kind]) return `Publishing ${media.kind === "image" ? "images" : "videos"} to ${CHANNEL_NAMES[item.channel] ?? item.channel} isn't supported yet. Export it, or remove the ${media.kind}.`;
+  }
   if (!integration) return "Connect the account on the Connections page first.";
   if (integration.status !== "connected") return "The connected account needs attention on the Connections page.";
   return null;
@@ -110,7 +156,7 @@ async function moveItem(q: QueryClient, tenantId: string, item: ContentItemRow, 
 
 type Prepared =
   | { kind: "done"; outcome: string }
-  | { kind: "send"; publicationId: string; itemId: string; integrationId: string; channel: PublishableChannel; attempts: number; post: PublishablePost; credential: unknown };
+  | { kind: "send"; publicationId: string; itemId: string; integrationId: string; channel: PublishableChannel; attempts: number; post: PublishablePost; credential: unknown; media: { key: string; meta: PostMedia; altText: string | null } | null };
 
 /** Process one publication. Safe to call concurrently and repeatedly. Returns a short outcome label. */
 export async function processPublication(deps: PublisherDeps, args: { tenantId: string; publicationId: string }): Promise<string> {
@@ -135,16 +181,30 @@ export async function processPublication(deps: PublisherDeps, args: { tenantId: 
   const prepared = await inTenant(deps.publisherDb, { tenantId: args.tenantId }, (q) => prepare(deps, q, args.tenantId, args.publicationId, now));
   if (prepared.kind === "done") return prepared.outcome;
 
-  let result: { externalId: string; permalink: string | null } | null = null;
+  let result: { externalId: string; permalink: string | null; note?: string } | null = null;
   let error: PublishError | null = null;
+  let heartbeat: NodeJS.Timeout | undefined;
   try {
     const adapter = deps.adapters[prepared.channel];
     if (!adapter) throw new PublishError("permanent", `Publishing to ${prepared.channel} isn't configured on this server.`);
-    result = await (adapter as ChannelAdapter<unknown>).publish(prepared.post, prepared.credential);
+    let post = prepared.post;
+    if (prepared.media) {
+      if (!deps.media) throw new PublishError("permanent", "Media storage isn't configured on this server.");
+      post = { ...post, media: publishableMedia(deps.media, prepared.media.key, prepared.media.meta, prepared.media.altText) };
+    }
+    // Long video uploads can outlast the stranded-send window: keep the row's timestamp fresh
+    // while this worker is alive, so another worker doesn't mark it lost mid-send.
+    heartbeat = setInterval(() => {
+      inTenant(deps.publisherDb, { tenantId: args.tenantId }, (q) => q.query(`UPDATE publications SET updated_at = now() WHERE id = $1 AND status = 'publishing'`, [prepared.publicationId])).catch((e: unknown) => deps.log?.("[publisher] heartbeat failed", e));
+    }, HEARTBEAT_MS);
+    heartbeat.unref();
+    result = await (adapter as ChannelAdapter<unknown>).publish(post, prepared.credential);
   } catch (err) {
     // Unknown failures might have happened after the platform accepted the post: treat as ambiguous.
     error = err instanceof PublishError ? err : new PublishError("ambiguous", `Unexpected error: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500));
     if (!(err instanceof PublishError)) deps.log?.("[publisher] unexpected adapter error", err);
+  } finally {
+    clearInterval(heartbeat);
   }
   return inTenant(deps.publisherDb, { tenantId: args.tenantId }, (q) => record(q, args.tenantId, prepared, result, error, deps.now?.() ?? new Date()));
 }
@@ -199,6 +259,20 @@ async function prepare(deps: PublisherDeps, q: QueryClient, tenantId: string, pu
     integration.status = "needs_reauth";
   }
   const credential = integration ? await readCredential(q, integration.id) : null;
+  // The attached file must still exist and be the exact file that was approved.
+  let mediaRef: { key: string; meta: PostMedia; altText: string | null } | null = null;
+  const attached = post.media?.[0];
+  if (attached) {
+    const asset = await getAsset(q, attached.asset_id);
+    if (!asset || asset.sha256 !== attached.sha256) {
+      const reasons = ["The attached file is missing or doesn't match the approved one."];
+      await updatePublication(q, pub.id, { status: "needs_attention", lastError: `Not sent: ${reasons[0]}` });
+      await moveItem(q, tenantId, item, { type: "unschedule" }, { reason: reasons });
+      await appendAudit(q, tenantId, { actorType: "system", actorId: SYSTEM.id, action: "publish.blocked", entityType: "publication", entityId: pub.id, after: { reasons } });
+      return { kind: "done", outcome: "blocked" };
+    }
+    mediaRef = { key: asset.storageKey, meta: attached, altText: post.alt_text ?? null };
+  }
   const gate = evaluatePublishGate({
     globalPaused: global.paused,
     tenantPaused: tenant.pausedAt !== null,
@@ -251,7 +325,7 @@ async function prepare(deps: PublisherDeps, q: QueryClient, tenantId: string, pu
   await updatePublication(q, pub.id, { status: "publishing", attemptsIncrement: true, lastError: null, nextAttemptAt: null });
   await moveItem(q, tenantId, item, { type: "start_publish" }, { publicationId: pub.id });
   await appendAudit(q, tenantId, { actorType: "system", actorId: SYSTEM.id, action: "publish.started", entityType: "publication", entityId: pub.id, after: { channel: item.channel, attempt: pub.attempts + 1 } });
-  return { kind: "send", publicationId: pub.id, itemId: item.id, integrationId: integration!.id, channel: item.channel as PublishableChannel, attempts: pub.attempts + 1, post: publishablePost(post, pub.idempotencyKey), credential: secret };
+  return { kind: "send", publicationId: pub.id, itemId: item.id, integrationId: integration!.id, channel: item.channel as PublishableChannel, attempts: pub.attempts + 1, post: publishablePost(post, pub.idempotencyKey), credential: secret, media: mediaRef };
 }
 
 const GATE_TOKEN_MARGIN_MS = 10 * 60_000;
@@ -273,12 +347,12 @@ export function retryDelayMs(attempt: number, retryAfterMs?: number): number {
   return Math.min(60 * 60_000, Math.max(base, retryAfterMs ?? 0));
 }
 
-async function record(q: QueryClient, tenantId: string, p: Extract<Prepared, { kind: "send" }>, result: { externalId: string; permalink: string | null } | null, error: PublishError | null, now: Date): Promise<string> {
+async function record(q: QueryClient, tenantId: string, p: Extract<Prepared, { kind: "send" }>, result: { externalId: string; permalink: string | null; note?: string } | null, error: PublishError | null, now: Date): Promise<string> {
   const pub = await lockPublication(q, p.publicationId, { skipLocked: false });
   const item = await lockContentItem(q, p.itemId);
   if (!pub || !item) return "missing";
   if (result) {
-    await updatePublication(q, pub.id, { status: "published", externalId: result.externalId, permalink: result.permalink, published: true, lastError: null });
+    await updatePublication(q, pub.id, { status: "published", externalId: result.externalId, permalink: result.permalink, published: true, lastError: null, note: result.note?.slice(0, 500) ?? null });
     // "failed" here means the stranded-send handler gave up on it while the call was still running.
     if (item.state === "publishing" || item.state === "failed") await moveItem(q, tenantId, item, { type: "publish_succeeded", externalId: result.externalId });
     await appendAudit(q, tenantId, { actorType: "system", actorId: SYSTEM.id, action: "publish.succeeded", entityType: "publication", entityId: pub.id, after: { externalId: result.externalId, permalink: result.permalink } });

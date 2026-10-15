@@ -17,8 +17,10 @@ export interface Req {
   params: Record<string, string>;
   cookies: Record<string, string>;
   ip: string;
-  /** Parsed urlencoded form body (POST only). */
+  /** Parsed form body (POST only): urlencoded, or the text fields of an allowed multipart upload. */
   form: URLSearchParams;
+  /** Uploaded files (multipart POSTs to upload routes only), streamed to temp files. */
+  files?: Array<{ field: string; filename: string; path: string; bytes: number }>;
 }
 
 export interface Res {

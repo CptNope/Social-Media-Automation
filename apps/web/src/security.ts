@@ -85,7 +85,7 @@ export const newLoginToken = (): { token: string; hash: string } => {
 export const sha256Hex = (s: string): string => createHash("sha256").update(s).digest("hex");
 
 export const SECURITY_HEADERS: Record<string, string> = {
-  "content-security-policy": "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self' https://www.facebook.com; frame-ancestors 'none'; base-uri 'none'",
+  "content-security-policy": "default-src 'none'; style-src 'self'; img-src 'self' data:; media-src 'self'; form-action 'self' https://www.facebook.com; frame-ancestors 'none'; base-uri 'none'",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
   "referrer-policy": "same-origin",
