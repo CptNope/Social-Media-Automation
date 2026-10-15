@@ -67,6 +67,9 @@ describe("publishing schema (0004)", { skip: bin ? false : "Postgres server bina
       assert.match(x.err, /permission denied/);
     }
     assert.equal(as("publisher_user", "SET LOCAL ROLE jat_scheduler; UPDATE publications SET status = 'cancelled';").ok, false);
+    // 0005: token expiry is visible (for background renewal); tokens and account names are not.
+    assert.equal(as("publisher_user", "SET LOCAL ROLE jat_scheduler; SELECT count(*) FROM integrations WHERE token_expires_at IS NULL AND channel = 'bluesky';").out, "2");
+    assert.equal(as("publisher_user", "SET LOCAL ROLE jat_scheduler; UPDATE integrations SET token_expires_at = now();").ok, false);
   });
 
   it("the web role can't become the scheduler or read credentials", () => {

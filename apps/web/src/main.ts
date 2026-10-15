@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { HttpClaudeClient, runBrandExtraction, runPlanning, runPostDraft, runPostReview } from "@jat/ai";
 import { DbSpendLedger, type Database } from "@jat/db";
 import { crawlSite, createSafeFetch } from "@jat/ingest";
-import { BlueskyAdapter, FacebookPagesAdapter } from "@jat/integrations";
+import { BlueskyAdapter, FacebookPagesAdapter, GoogleBusinessAdapter, LINKEDIN_DEFAULT_VERSION, LinkedInAdapter, ThreadsAdapter, XAdapter } from "@jat/integrations";
 import { LocalKekProvider } from "@jat/vault";
 import { createApp, type Mailer } from "./app.ts";
 import { InProcessJobs } from "./jobs.ts";
@@ -25,6 +25,11 @@ import { startDispatcher, type PublisherDeps } from "./publisher.ts";
  *   PUBLISH_MODE            "live" to actually send; anything else is dry-run (default)
  *   LOCAL_KEK_BASE64        32-byte credential KEK (development only; production needs a KMS provider — not built yet)
  *   FACEBOOK_APP_ID, FACEBOOK_APP_SECRET, FACEBOOK_GRAPH_VERSION (default v26.0)
+ *   LINKEDIN_CLIENT_ID, LINKEDIN_CLIENT_SECRET, LINKEDIN_VERSION (default 202610)
+ *   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET   (Google Business Profile)
+ *   THREADS_APP_ID, THREADS_APP_SECRET, THREADS_GRAPH_HOST (default graph.threads.net)
+ *   X_CLIENT_ID, X_CLIENT_SECRET
+ *   Each platform's OAuth redirect URI is {BASE_URL}/oauth/{channel}/callback
  *   PUBLISHER_INTERVAL_SECONDS  dispatcher interval, default 30
  *   JAT_PROCESS             all (default) | web | worker — see below
  */
@@ -77,18 +82,22 @@ async function publishing(): Promise<PublishingConfig | null> {
   const safeFetch = createSafeFetch();
   // Bluesky writes go to the account's PDS (from its DID document), so use the SSRF-safe client.
   const bluesky = new BlueskyAdapter(safeFetch);
-  const facebook =
-    env.FACEBOOK_APP_ID && env.FACEBOOK_APP_SECRET
-      ? new FacebookPagesAdapter({ appId: env.FACEBOOK_APP_ID, appSecret: env.FACEBOOK_APP_SECRET, version: env.FACEBOOK_GRAPH_VERSION ?? "v26.0", redirectUri: new URL("/oauth/facebook/callback", required("BASE_URL")).toString() })
-      : null;
+  const callback = (channel: string) => new URL(`/oauth/${channel}/callback`, required("BASE_URL")).toString();
+  // Each OAuth platform is enabled by its app credentials; missing ones show "not configured".
+  const facebook = env.FACEBOOK_APP_ID && env.FACEBOOK_APP_SECRET ? new FacebookPagesAdapter({ appId: env.FACEBOOK_APP_ID, appSecret: env.FACEBOOK_APP_SECRET, version: env.FACEBOOK_GRAPH_VERSION ?? "v26.0", redirectUri: callback("facebook") }) : undefined;
+  const linkedin = env.LINKEDIN_CLIENT_ID && env.LINKEDIN_CLIENT_SECRET ? new LinkedInAdapter({ clientId: env.LINKEDIN_CLIENT_ID, clientSecret: env.LINKEDIN_CLIENT_SECRET, redirectUri: callback("linkedin"), version: env.LINKEDIN_VERSION ?? LINKEDIN_DEFAULT_VERSION }) : undefined;
+  const google = env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? new GoogleBusinessAdapter({ clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, redirectUri: callback("google_business_profile") }) : undefined;
+  const threads = env.THREADS_APP_ID && env.THREADS_APP_SECRET ? new ThreadsAdapter({ appId: env.THREADS_APP_ID, appSecret: env.THREADS_APP_SECRET, redirectUri: callback("threads"), ...(env.THREADS_GRAPH_HOST ? { graphHost: env.THREADS_GRAPH_HOST } : {}) }) : undefined;
+  const x = env.X_CLIENT_ID && env.X_CLIENT_SECRET ? new XAdapter({ clientId: env.X_CLIENT_ID, clientSecret: env.X_CLIENT_SECRET, redirectUri: callback("x") }) : undefined;
+  const oauth = { ...(facebook ? { facebook } : {}), ...(linkedin ? { linkedin } : {}), ...(google ? { google_business_profile: google } : {}), ...(threads ? { threads } : {}), ...(x ? { x } : {}) };
   let publisher: PublisherDeps | null = null;
   if (processRole !== "web") {
     const publisherDb: Database = devPsql
       ? new (await import("@jat/db/testing/psql-client")).PsqlDatabase({ bin: required("PG_BIN"), host: required("PGHOST"), port: env.PGPORT ?? "5432", user: env.PGUSER ?? "postgres", database: env.PGDATABASE ?? "postgres" }, "publisher_user")
       : await createPgDatabase(required("PUBLISHER_DATABASE_URL"));
-    publisher = { publisherDb, keks: kek, mode, adapters: { bluesky, facebook }, safeFetch, log: (m, e) => console.error(m, e ?? "") };
+    publisher = { publisherDb, keks: kek, activeKek: kek, mode, adapters: { bluesky, ...oauth }, safeFetch, log: (m, e) => console.error(m, e ?? "") };
   }
-  return { mode, activeKek: kek, bluesky, facebook, publisher };
+  return { mode, activeKek: kek, bluesky, oauth, publisher };
 }
 const publishingConfig = await publishing();
 if (publishingConfig?.publisher) {

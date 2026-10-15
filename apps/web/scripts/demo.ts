@@ -103,7 +103,8 @@ const publisher: PublisherDeps = {
   publisherDb: new PsqlDatabase(pg.conn, "publisher_user"),
   keks: kek,
   mode: "dry_run",
-  adapters: { bluesky: process.env.DEMO_FAKE_PUBLISH === "1" ? offlineBluesky : new BlueskyAdapter(safeFetch), facebook: null },
+  activeKek: kek,
+  adapters: { bluesky: process.env.DEMO_FAKE_PUBLISH === "1" ? offlineBluesky : new BlueskyAdapter(safeFetch) },
   safeFetch,
   log: (m, e) => console.error(m, e ?? ""),
 };
@@ -125,7 +126,7 @@ const handler = createApp({
     draft: (r) => runPostDraft({ client: claude, ledger }, r),
     review: (r) => runPostReview({ client: claude, ledger }, r),
   },
-  publishing: { mode: "dry_run", activeKek: kek, bluesky: publisher.adapters.bluesky, facebook: null, publisher },
+  publishing: { mode: "dry_run", activeKek: kek, bluesky: publisher.adapters.bluesky!, oauth: {}, publisher },
 });
 
 const server = createServer((req, res) => void handler(req, res)).listen(port, () => {

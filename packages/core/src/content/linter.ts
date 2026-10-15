@@ -1,6 +1,6 @@
 import type { Finding, RiskClass } from "../types.ts";
 import { hasBlockers } from "../types.ts";
-import { PLATFORM_LIMITS, measureLength } from "./platform-limits.ts";
+import { PLATFORM_LIMITS, measureLength, publishedText } from "./platform-limits.ts";
 import { composeCaption, isVisualFormat, type PostDraft } from "./post.ts";
 import { validateTrackedUrl } from "../marketing/utm.ts";
 
@@ -88,9 +88,10 @@ export function lintPost(post: PostDraft, ctx: LintContext): Finding[] {
   }
 
   // Length
-  const len = measureLength(caption, limits.countBy);
+  const len = measureLength(publishedText(post), limits.countBy);
   if (len > limits.maxChars) {
-    f.push({ code: "length.exceeded", severity: "blocker", field: "body", message: `Caption is ${len} ${limits.countBy}; ${post.channel} allows ${limits.maxChars}.` });
+    const unit = limits.countBy === "x_weighted" ? "characters (X counts links as 23 and emoji as 2)" : limits.countBy;
+    f.push({ code: "length.exceeded", severity: "blocker", field: "body", message: `${limits.linkInText && post.link ? "Text with link" : "Caption"} is ${len} ${unit}; ${post.channel} allows ${limits.maxChars}.` });
   }
 
   // Forbidden phrases (brand hard rule)

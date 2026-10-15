@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { PostDraftSchema, composeCaption, deriveRiskClass, findPhrase, lintPost, trigramSimilarity, type LintContext } from "../src/index.ts";
+import { PostDraftSchema, composeCaption, xWeightedLength, deriveRiskClass, findPhrase, lintPost, trigramSimilarity, type LintContext } from "../src/index.ts";
 import { postFixture } from "./fixtures.ts";
 
 const ctx = (over: Partial<LintContext> = {}): LintContext => ({
@@ -93,5 +93,29 @@ describe("lintPost", () => {
     assert.equal(deriveRiskClass(offer, lintPost(offer, ctx())), "medium");
     assert.equal(deriveRiskClass(postFixture(), [{ code: "x", severity: "blocker", message: "" }]), "high");
     assert.equal(deriveRiskClass(postFixture(), [], { industryRestricted: true }), "high");
+  });
+});
+
+describe("X weighted length (docs.x.com counting characters)", () => {
+  it("counts URLs as 23, emoji and CJK as 2, Latin as 1", () => {
+    assert.equal(xWeightedLength("hello"), 5);
+    assert.equal(xWeightedLength("see https://example.com/a/very/long/path?utm_source=x&utm_medium=social"), 4 + 23);
+    assert.equal(xWeightedLength("👍🏽"), 2, "emoji with a skin-tone modifier is one emoji");
+    assert.equal(xWeightedLength("👨‍👩‍👧"), 2, "ZWJ sequence counts once");
+    assert.equal(xWeightedLength("日本語"), 6);
+    assert.equal(xWeightedLength("é"), 1, "NFC-normalized");
+    assert.equal(xWeightedLength("visit example.com today"), 6 + 23 + 6, "bare domains count as links");
+    assert.equal(xWeightedLength("(https://a.co/x)."), 1 + 23 + 2, "trailing punctuation isn't part of the URL");
+    assert.equal(xWeightedLength("see https://en.wikipedia.org/wiki/Pipe_(fluid)"), 4 + 23, "balanced parentheses stay in the URL");
+    assert.equal(xWeightedLength("v1.2 and e.g. ok"), 16, "version numbers and abbreviations aren't domains");
+  });
+
+  it("the X linter counts the link that travels inside the text", () => {
+    const link = { url: "https://acme.example/?utm_source=x&utm_medium=social&utm_campaign=w" };
+    const x = (hook: string) => lintPost(postFixture({ channel: "x", format: "text", creative_brief: null, alt_text: null, hook, body: "", cta: "", link }), { forbiddenPhrases: [], usableClaimIds: new Set(), recentHooks: [] });
+    assert.ok(!x("a".repeat(255)).some((f) => f.code === "length.exceeded"), "255 + 2 + 23 = 280 fits");
+    const over = x("a".repeat(256)).find((f) => f.code === "length.exceeded");
+    assert.ok(over, "256 + 2 + 23 = 281 doesn't");
+    assert.match(over!.message, /Text with link is 281 characters/);
   });
 });

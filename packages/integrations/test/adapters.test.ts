@@ -119,7 +119,7 @@ describe("Facebook Pages adapter", () => {
   const app = { appId: "123", appSecret: "shh", version: "v26.0", redirectUri: "https://app.example/oauth/facebook/callback" };
 
   it("builds the login URL with state and the minimal scopes", () => {
-    const u = new URL(new FacebookPagesAdapter(app).authorizeUrl("state-1"));
+    const u = new URL(new FacebookPagesAdapter(app).authorizeUrl({ state: "state-1" }));
     assert.equal(u.origin + u.pathname, "https://www.facebook.com/v26.0/dialog/oauth");
     assert.equal(u.searchParams.get("state"), "state-1");
     assert.equal(u.searchParams.get("scope"), "pages_show_list,pages_read_engagement,pages_manage_posts");

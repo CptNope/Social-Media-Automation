@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { PublishError, timedFetch, type ChannelAdapter, type FetchLike, type PublishablePost, type PublishResult } from "./types.ts";
+import { PublishError, timedFetch, type ChannelAdapter, type FetchLike, type PublishablePost, type PublishResult, type ConnectableAccount, type OAuthConnector } from "./types.ts";
 
 /**
  * Facebook Pages adapter (Graph API). See docs/research/2026-10-publishing-apis.md.
@@ -28,18 +28,21 @@ export function appSecretProof(appSecret: string, token: string): string {
   return createHmac("sha256", appSecret).update(token).digest("hex");
 }
 
-export function classifyGraphError(status: number, body: unknown): PublishError {
+export function classifyGraphError(status: number, body: unknown, platform = "Facebook"): PublishError {
   const e = (body as { error?: { message?: string; code?: number; error_subcode?: number; fbtrace_id?: string } } | null)?.error;
   const code = e?.code ?? 0;
-  const msg = `Facebook ${status} (code ${code}${e?.error_subcode ? `/${e.error_subcode}` : ""}): ${e?.message ?? "unknown error"}`.slice(0, 500);
+  const msg = `${platform} ${status} (code ${code}${e?.error_subcode ? `/${e.error_subcode}` : ""}): ${e?.message ?? "unknown error"}`.slice(0, 500);
   if (TRANSIENT.has(code) || status >= 500) return new PublishError("transient", msg, 15 * 60_000, String(code));
   if (AUTH.has(code)) return new PublishError("auth", msg, undefined, String(code));
   if (code === 10 || (code >= 200 && code <= 299)) return new PublishError("permission", msg, undefined, String(code));
   return new PublishError("permanent", msg, undefined, String(code));
 }
 
-export class FacebookPagesAdapter implements ChannelAdapter<FacebookPageCredential> {
+export class FacebookPagesAdapter implements ChannelAdapter<FacebookPageCredential>, OAuthConnector<FacebookPageCredential> {
   readonly channel = "facebook" as const;
+  readonly accountNoun = "Page";
+  readonly scopes = FACEBOOK_SCOPES;
+  readonly usesPkce = false;
   constructor(
     private readonly app: FacebookAppConfig,
     private readonly fetchImpl: FetchLike = fetch,
@@ -72,7 +75,7 @@ export class FacebookPagesAdapter implements ChannelAdapter<FacebookPageCredenti
   }
 
   // -------------------------------------------------------------- OAuth
-  authorizeUrl(state: string): string {
+  authorizeUrl({ state }: { state: string }): string {
     const q = new URLSearchParams({ client_id: this.app.appId, redirect_uri: this.app.redirectUri, state, scope: FACEBOOK_SCOPES.join(","), response_type: "code" });
     return `https://www.facebook.com/${this.app.version}/dialog/oauth?${q}`;
   }
@@ -89,6 +92,18 @@ export class FacebookPagesAdapter implements ChannelAdapter<FacebookPageCredenti
     const longLived = await get({ grant_type: "fb_exchange_token", client_id: this.app.appId, client_secret: this.app.appSecret, fb_exchange_token: shortLived });
     const accounts = (await this.#request("GET", "me/accounts", longLived, { fields: "id,name,access_token,tasks", limit: "100" })) as { data?: Array<{ id: string; name: string; access_token: string; tasks?: string[] }> };
     return (accounts.data ?? []).map((p) => ({ id: p.id, name: p.name, accessToken: p.access_token, canPost: (p.tasks ?? []).includes("CREATE_CONTENT") }));
+  }
+
+  /** Page tokens obtained from a long-lived user token don't expire (they can be invalidated: error 190). */
+  async accountsFromCode({ code }: { code: string }): Promise<Array<ConnectableAccount<FacebookPageCredential>>> {
+    return (await this.pagesFromCode(code)).map((p) => ({
+      id: p.id,
+      name: p.name,
+      canPost: p.canPost,
+      ...(p.canPost ? {} : { reason: "your role on this Page can't create posts" }),
+      credential: { pageId: p.id, pageName: p.name, pageAccessToken: p.accessToken },
+      tokenExpiresAt: null,
+    }));
   }
 
   // -------------------------------------------------------------- publishing

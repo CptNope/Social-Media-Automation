@@ -1,4 +1,4 @@
-import { CHANNELS, DEFAULT_TIMEZONE, PLATFORM_LIMITS, addDays, composeCaption, localDate, measureLength, type Finding, type PostDraft } from "@jat/core";
+import { CHANNELS, DEFAULT_TIMEZONE, PLATFORM_LIMITS, addDays, composeCaption, localDate, measureLength, publishedText, type Finding, type PostDraft } from "@jat/core";
 import type { ApprovalRow, CampaignRow, ChannelSetting, ContentItemRow, PublicationRow, SlotRow, WorkRun } from "@jat/db";
 import { html, type Html } from "../html.ts";
 import { csrfField, notice, page, when, type Shell } from "./layout.ts";
@@ -310,6 +310,7 @@ ${
     ? pb.blocker
       ? html`<p class="muted">${pb.blocker}</p>`
       : html`<p class="small muted">Publishes to <strong>${pb.accountName ?? ""}</strong>. Every check runs again right before sending.</p>
+${i.channel === "x" ? html`<p class="small muted">X charges this account's API credits ${/https?:\/\/|\b[a-z0-9-]+\.[a-z]{2,}\b/i.test(publishedText(i.body as PostDraft)) ? "$0.20 for this post (it contains a link)" : "$0.015 for this post"}.</p>` : ""}
 <form method="post" action="/w/${w.id}/content/${i.id}/schedule" class="row schedule-form">${csrfField(shell.csrf)}<input type="hidden" name="fingerprint" value="${i.contentHash ?? ""}">
   <div class="field"><label for="sd">Date</label><input id="sd" name="date" type="text" value="${pb.defaultAt.date}" pattern="\\d{4}-\\d{2}-\\d{2}" required></div>
   <div class="field"><label for="st">Time <span class="hint">US Eastern, 24-hour</span></label><input id="st" name="time" type="text" value="${pb.defaultAt.time}" pattern="\\d{2}:\\d{2}" required></div>
@@ -356,7 +357,7 @@ export function contentItemPage(shell: Shell, d: ItemPageData): Html {
   const p = i.body as PostDraft;
   const caption = composeCaption(p);
   const limits = PLATFORM_LIMITS[p.channel];
-  const len = measureLength(caption, limits.countBy);
+  const len = measureLength(publishedText(p), limits.countBy);
   const editable = d.canEdit && ["draft", "in_review", "approved"].includes(i.state);
   const blockers = i.findings.filter((f) => f.severity === "blocker").length;
   const fromAi = (i.revisionCreatedBy ?? "").startsWith("work_run:");
@@ -369,7 +370,7 @@ ${d.flash ? notice(d.flash.kind, d.flash.message) : ""}
   <section class="panel post-preview" aria-label="Preview">
     <h2>Preview</h2>
     <div class="caption">${caption}</div>
-    <p class="small muted">${len} of ${limits.maxChars === Number.MAX_SAFE_INTEGER ? "∞" : limits.maxChars} ${limits.countBy}${linkLine(p.link?.url)}</p>
+    <p class="small muted">${len} of ${limits.maxChars === Number.MAX_SAFE_INTEGER ? "∞" : limits.maxChars} ${limits.countBy === "x_weighted" ? "characters (X counts the link as 23, emoji as 2)" : limits.countBy}${linkLine(p.link?.url)}</p>
     <dl class="facts small post-facts">
     ${
       p.creative_brief
