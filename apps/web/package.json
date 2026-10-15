@@ -1,0 +1,21 @@
+{
+  "name": "@jat/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "dev": "tsx watch src/main.ts",
+    "demo": "tsx scripts/demo.ts"
+  },
+  "dependencies": {
+    "@jat/ai": "workspace:*",
+    "@jat/core": "workspace:*",
+    "@jat/db": "workspace:*",
+    "@jat/ingest": "workspace:*",
+    "@jat/integrations": "workspace:*",
+    "@jat/vault": "workspace:*",
+    "pg": "^8.16.0",
+    "zod": "^3.25.0"
+  }
+}
