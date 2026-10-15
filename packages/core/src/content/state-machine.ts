@@ -24,6 +24,9 @@ export type ContentEvent =
   | { type: "request_changes"; reason: string }
   | { type: "edit"; newContentHash: string }
   | { type: "schedule"; at: string }
+  | { type: "unschedule" }
+  /** Re-queue a failed publish of the same approved content (e.g. after reconnecting an account). */
+  | { type: "retry_publish" }
   | { type: "start_publish" }
   | { type: "publish_succeeded"; externalId: string }
   | { type: "mark_exported" }
@@ -131,6 +134,17 @@ export function transition(current: ContentItemState, event: ContentEvent, actor
       detail = { at: event.at };
       break;
 
+    case "unschedule":
+      if (s !== "scheduled") fail("item is not scheduled");
+      next.state = "approved";
+      break;
+
+    case "retry_publish":
+      if (s !== "failed") fail("only failed items can be retried");
+      if (current.approvedHash !== current.contentHash) fail("approval does not match current content");
+      next.state = "scheduled";
+      break;
+
     case "start_publish":
       if (s !== "scheduled" && s !== "approved") fail("item is not ready to publish");
       if (current.approvedHash !== current.contentHash) fail("approval does not match current content");
@@ -138,13 +152,15 @@ export function transition(current: ContentItemState, event: ContentEvent, actor
       break;
 
     case "publish_succeeded":
-      if (s !== "publishing") fail("item is not publishing");
+      // From failed: a send the system had given up on (stranded) reported success late.
+      if (s !== "publishing" && !(s === "failed" && actor.type === "system")) fail("item is not publishing");
       next.state = "published";
       detail = { externalId: event.externalId };
       break;
 
     case "mark_exported":
-      if (s !== "approved" && s !== "scheduled") fail("only approved items can be exported");
+      // From failed: the person checked the platform and the post did go out (or they posted it by hand).
+      if (s !== "approved" && s !== "scheduled" && s !== "failed") fail("only approved items can be exported");
       if (current.approvedHash !== current.contentHash) fail("approval does not match current content");
       next.state = "exported";
       break;

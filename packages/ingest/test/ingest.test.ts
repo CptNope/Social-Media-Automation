@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { assertPublicUrl, crawlSite, extractColors, extractFonts, extractPage, isAllowed, isPrivateAddress, parseRobots, pinnedLookup, UnsafeUrlError, v6Bytes } from "../src/index.ts";
+import { assertPublicUrl, crawlSite, createSafeFetch, extractColors, extractFonts, extractPage, isAllowed, isPrivateAddress, parseRobots, pinnedLookup, UnsafeUrlError, v6Bytes } from "../src/index.ts";
 
 describe("robots.txt (RFC 9309)", () => {
   const txt = `
@@ -79,6 +79,17 @@ describe("SSRF guard", () => {
     await assert.rejects(assertPublicUrl("https://acme.example:8443", pub), UnsafeUrlError);
     await assert.rejects(assertPublicUrl("https://rebind.example", async () => ["10.0.0.5"]), /non-public/);
     assert.equal((await assertPublicUrl("https://acme.example/about", pub)).hostname, "acme.example");
+  });
+});
+
+describe("SSRF-safe fetch (used for customer WordPress sites and Bluesky PDS hosts)", () => {
+  it("refuses private IP literals (which skip DNS) and private DNS answers, before connecting", async () => {
+    const f = createSafeFetch(async () => ["10.0.0.5"]);
+    for (const u of ["https://127.0.0.1/", "https://[::1]/", "http://169.254.169.254/latest/meta-data/", "https://[::ffff:7f00:1]/"]) {
+      await assert.rejects(f(u, { method: "POST", body: "{}" }), (e: unknown) => e instanceof UnsafeUrlError, u);
+    }
+    await assert.rejects(f("https://wp.example/", { method: "POST", body: "{}" }), /non-public/);
+    await assert.rejects(f("file:///etc/passwd"), UnsafeUrlError);
   });
 });
 

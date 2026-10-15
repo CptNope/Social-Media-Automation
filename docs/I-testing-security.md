@@ -38,10 +38,13 @@ Additional hard rules: approvals bind to the content hash; global/tenant/channel
 8. Call → persist result → audit.
 
 ## 4. Error recovery
-- Transient (429, 5xx, network): exponential backoff with jitter, max 5 attempts within the publish window, then `needs_attention`.
-- Permanent (4xx validation, permission): no retry; `needs_attention` + operator notification.
-- **Ambiguous** (timeout after request sent): do *not* blindly retry; reconcile by listing recent posts on the account and matching our marker/hash before retrying.
-- Token revoked: mark integration `needs_reauth`, pause that channel for the tenant, notify.
+- Transient — only when nothing can have reached the platform (429/rate-limit codes, DNS failure, connection refused, TLS errors): exponential backoff (1, 2, 4, 8 min, or the platform's Retry-After if longer), max 5 attempts, then `needs_attention`.
+- Permanent (4xx validation, policy blocks, blocked host): no retry; `needs_attention`.
+- **Ambiguous** (timeout or dropped connection after the request was sent, 5xx on a create, unknown errors): never retried automatically. The post page tells the person to check the account, then either "Retry now" or "It did post — mark as posted". *Automatic reconciliation (list recent posts and match) is not built yet.*
+- Stranded (worker died mid-send; `publishing` for 15 min): `needs_attention`, never resent; a late success is still recorded as published.
+- Token revoked (`auth`): integration set to `needs_reauth`; retries are refused until the account is reconnected.
+
+**As built (Phase 4):** steps 1–6 and 8 of §3 run in `apps/web/src/publisher.ts` through `evaluatePublishGate()`; the row is locked `FOR UPDATE SKIP LOCKED` and set to `publishing` (committed) before the call. Step 7 (quota headroom) is not implemented; rate limits are handled reactively as transient errors. Platform-side idempotency keys are not available on Bluesky or Facebook (see `docs/research/2026-10-publishing-apis.md`).
 
 ## 5. Security controls
 

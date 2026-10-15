@@ -5,7 +5,7 @@ export interface Shell {
   csrf: string;
   user: { email: string; name: string | null };
   workspace?: { id: string; name: string; roleLabel: string };
-  active?: "overview" | "brand" | "claims" | "plan" | "content" | "approvals" | "workspaces";
+  active?: "overview" | "brand" | "claims" | "plan" | "content" | "approvals" | "connections" | "workspaces";
 }
 
 export const ROLE_LABELS: Record<string, string> = {
@@ -43,6 +43,7 @@ ${opts.refreshSeconds ? html`<meta http-equiv="refresh" content="${opts.refreshS
       ${navLink("plan", `/w/${w.id}/plan`, "Plan")}
       ${navLink("content", `/w/${w.id}/content`, "Content")}
       ${navLink("approvals", `/w/${w.id}/approvals`, "Approvals")}
+      ${navLink("connections", `/w/${w.id}/connections`, "Connections")}
       ${navLink("workspaces", "/", "All clients")}
     </nav>`
         : html`<nav class="nav" aria-label="Main">${navLink("workspaces", "/", "Clients")}</nav>`

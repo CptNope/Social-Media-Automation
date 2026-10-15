@@ -2,7 +2,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 
 /**
  * SSRF protection for user-supplied URLs (client websites, competitor URLs).
@@ -149,15 +149,23 @@ export function pinnedLookup(resolve: Resolver = defaultResolver): LookupFunctio
 }
 
 /**
- * fetch-compatible GET over node:http(s) with a pinned, validated DNS lookup.
- * Never follows redirects (the caller re-validates each hop).
+ * fetch-compatible client over node:http(s) with a pinned, validated DNS lookup.
+ * Supports GET and simple string-body requests (API clients such as the WordPress connector).
+ * Never follows redirects (the caller re-validates each hop). IP-literal hosts skip DNS, so
+ * they are checked here directly.
  */
-export function createSafeFetch(resolve: Resolver = defaultResolver): typeof fetch {
+export function createSafeFetch(resolve: Resolver = defaultResolver, maxBodyBytes = 5 * 1024 * 1024): typeof fetch {
   const lookup = pinnedLookup(resolve);
   return (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new UnsafeUrlError(`Only http(s) URLs are allowed: ${url.protocol}`);
+    const literal = url.hostname.replace(/^\[|\]$/g, "");
+    if (isIP(literal) && isPrivateAddress(literal)) throw new UnsafeUrlError(`Host ${literal} is not public`);
+    if (url.port && url.port !== "443" && url.port !== "80") throw new UnsafeUrlError(`Non-standard port ${url.port} is not allowed`);
+    if (url.username || url.password) throw new UnsafeUrlError("URLs with credentials are not allowed");
+    if (init.body !== undefined && init.body !== null && typeof init.body !== "string") throw new Error("safe fetch supports string bodies only");
     const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
-      method: "GET",
+      method: init.method ?? "GET",
       headers: init.headers as Record<string, string>,
       lookup,
       signal: init.signal ?? undefined,
@@ -165,7 +173,7 @@ export function createSafeFetch(resolve: Resolver = defaultResolver): typeof fet
     const res: IncomingMessage = await new Promise((resolveRes, reject) => {
       req.on("response", resolveRes);
       req.on("error", reject);
-      req.end();
+      req.end(typeof init.body === "string" ? init.body : undefined);
     });
     const headers = new Headers();
     for (const [k, v] of Object.entries(res.headers)) {
@@ -179,6 +187,22 @@ export function createSafeFetch(resolve: Resolver = defaultResolver): typeof fet
     }
     const nullBody = status === 204 || status === 304;
     if (nullBody) res.resume();
-    return new Response(nullBody ? null : (Readable.toWeb(res) as ReadableStream), { status, headers });
+    return new Response(nullBody ? null : (Readable.toWeb(capped(res, maxBodyBytes)) as ReadableStream), { status, headers });
   }) as typeof fetch;
+}
+
+/** Responses from hosts a tenant controls are read with a size cap so one host can't exhaust memory. */
+function capped(res: IncomingMessage, max: number): Readable {
+  let seen = 0;
+  const out = new PassThrough();
+  res.on("data", (chunk: Buffer) => {
+    seen += chunk.length;
+    if (seen > max) {
+      res.destroy();
+      out.destroy(new Error(`Response larger than ${max} bytes`));
+    }
+  });
+  res.on("error", (e) => out.destroy(e));
+  res.pipe(out);
+  return out;
 }

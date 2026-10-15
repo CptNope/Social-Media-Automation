@@ -13,6 +13,8 @@
     "@jat/core": "workspace:*",
     "@jat/db": "workspace:*",
     "@jat/ingest": "workspace:*",
+    "@jat/integrations": "workspace:*",
+    "@jat/vault": "workspace:*",
     "pg": "^8.16.0"
   }
 }

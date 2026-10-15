@@ -9,7 +9,7 @@ PostgreSQL 16+. The executable source of truth is `packages/db/migrations/0001_i
 - Policy on each tenant table: `USING (tenant_id = current_setting('app.tenant_id', true)::uuid)` with the same `WITH CHECK`. An unset tenant matches nothing (fail closed).
 - `FORCE ROW LEVEL SECURITY` is enabled so even the table owner is subject to policies; migrations run as a separate `migrator` role.
 - Platform-level tables: `tenants` (the app can read its own row and update only operational columns — name, mode, pause; gating flags like `publishing_enabled`, `autonomous_eligible` and budgets are admin-only), `users` (read: yourself and members of the current workspace; created by invitation tooling), `platform_settings` (read-only to the app; global pause is admin-only).
-- Roles: `app_user` (web + worker, no credential reads), `publisher_user` (inherits `app_user` and may read/update `credentials`), and the migration owner. None has `BYPASSRLS`.
+- Roles: `app_user` (web, no credential reads), `publisher_user` (the publisher worker: inherits `app_user` and may read/update `credentials`), `jat_scheduler` (NOLOGIN; the publisher switches to it with `SET LOCAL ROLE` to find due work across tenants — it can see only ids, tenant ids, status and timing columns of `publications` and the check-request columns of `integrations`), and the migration owner. None has `BYPASSRLS`. Policies granted to `jat_scheduler` also check `current_user = 'jat_scheduler'`, because a policy granted to a role applies to its members too (without that, `publisher_user` would see every tenant's rows — a DB test guards this).
 - Append-only by grant: `content_revisions`, `approvals`, `audit_log`, `agent_runs` (AI cost ledger). `brand_dna_versions` cannot be deleted and active versions are immutable (trigger).
 - Cross-row integrity uses composite foreign keys that include `tenant_id` (and the owning item), so a row can never reference another tenant's — or another item's — data.
 
@@ -53,9 +53,9 @@ erDiagram
 | `content_revisions` | tenant_id, content_item_id, revision, body JSONB, content_hash, created_by (user or agent_run) | Hash = sha256 of canonical JSON |
 | `assets` | tenant_id, brand_id, kind, storage_key, mime, width, height, alt_text, license JSONB, origin (`uploaded`/`rendered`/`generated`) | Usage rights preserved |
 | `approvals` | tenant_id, content_item_id, revision_id, content_hash, decision (`approved`/`rejected`/`changes_requested`), decided_by (NULL only for policy auto-approvals), policy_reason, veto_until, comment, decided_at | Append-only; revision must belong to the same item; valid only while hash matches |
-| `integrations` | tenant_id, channel, external_account_id, display_name, status (`connected`/`needs_reauth`/`revoked`/`error`), capabilities JSONB, scopes[], token_expires_at, last_health_check_at | |
+| `integrations` | tenant_id, channel, external_account_id, display_name, status (`connected`/`needs_reauth`/`revoked`/`error`), channel_paused, capabilities JSONB, scopes[], token_expires_at, last_health_check_at, check_requested_at | One non-revoked account per channel (partial unique index); reconnecting the same account revives its row and keeps a channel pause |
 | `credentials` | tenant_id, integration_id, ciphertext, iv, auth_tag, wrapped_dek, kek_id, version | Envelope encrypted; only `publisher_user` can SELECT; web tier can insert and call `remove_credential()` |
-| `publications` | tenant_id, content_item_id, revision_id, integration_id, idempotency_key (unique per tenant), status (`queued`/`publishing`/`published`/`failed`/`needs_attention`/`exported`/`deleted`/`dry_run`), external_id, permalink, attempts, last_error, published_at | |
+| `publications` | tenant_id, content_item_id, revision_id, integration_id, idempotency_key (unique per tenant), status (`queued`/`publishing`/`published`/`failed`/`needs_attention`/`exported`/`deleted`/`dry_run`/`cancelled`), external_id, permalink, attempts, last_error, scheduled_for, next_attempt_at, published_at, created_by, updated_at | At most one live (`queued`/`publishing`) row per item (partial unique index). `publishing` is committed before the API call; a row stuck there for 15 min is "stranded" and goes to a person, never resent |
 | `metric_points` | tenant_id, publication_id or page_url, metric, value, period_start, period_end, source, fetched_at | Never stores estimates; source mandatory |
 | `agent_runs` | tenant_id, agent, model, input_hash, input_tokens, output_tokens, cached_tokens, cost_micros, latency_ms, status, output JSONB, error | Cost ledger |
 | `audit_log` | tenant_id, actor_type (`user`/`agent`/`system`), actor_id, action, entity_type, entity_id, before JSONB, after JSONB, ip, created_at | Append-only (UPDATE/DELETE revoked); no FK to tenants so history survives tenant deletion |
@@ -74,7 +74,14 @@ draft ─lint/QA─▶ in_review ─approve─▶ approved ─schedule─▶ sch
     draft / in_review / approved / scheduled / failed ──pause──▶ paused (resume returns to previous)
     (not while publishing: the in-flight call finishes and is recorded; the publish gate blocks further sends)
     in_review ──auto_approve (system, only when policy says approval not required)──▶ approved
+    scheduled ──unschedule──▶ approved          (also used by the publisher for dry runs and blocked sends)
+    scheduled/approved ──start_publish──▶ publishing ──publish_succeeded──▶ published
+    publishing ──publish_failed (transient)──▶ scheduled      publishing ──publish_failed (permanent)──▶ failed
+    failed ──retry_publish──▶ scheduled         failed ──mark_exported──▶ exported (a person confirms it did post)
+    failed ──publish_succeeded (system only)──▶ published   (a stranded send reported success late)
 ```
+
+Leaving `scheduled` by any route (sent back, rejected, posted by hand, archived) cancels the queued publication in the same transaction. Lock order everywhere: the live publication, then the content item.
 
 Transitions are implemented in `packages/core/src/content/state-machine.ts` and every transition writes an `audit_log` row in the same transaction.
 

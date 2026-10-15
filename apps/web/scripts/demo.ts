@@ -7,6 +7,10 @@
  * Sign-in links are shown on screen (development only). Without ANTHROPIC_API_KEY the
  * "Draft Brand DNA" job uses a canned sample response so the flow can be explored offline;
  * the website crawl is real unless DEMO_FAKE_CRAWL=1.
+ *
+ * Publishing runs in dry-run mode (nothing is ever sent). Bluesky connections are checked
+ * against the real service; DEMO_FAKE_PUBLISH=1 swaps in an offline stand-in that accepts
+ * any app password so the scheduling screens can be explored without an account.
  */
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
@@ -14,7 +18,10 @@ import { HttpClaudeClient, runBrandExtraction, runPlanning, runPostDraft, runPos
 import { sampleClaude } from "../src/sample-ai.ts";
 import { DbSpendLedger } from "@jat/db";
 import { PsqlDatabase } from "@jat/db/testing/psql-client";
-import { crawlSite, type CrawlResult } from "@jat/ingest";
+import { crawlSite, createSafeFetch, type CrawlResult } from "@jat/ingest";
+import { BlueskyAdapter, type BlueskyCredential, type ChannelAdapter } from "@jat/integrations";
+import { LocalKekProvider } from "@jat/vault";
+import { startDispatcher, type PublisherDeps } from "../src/publisher.ts";
 import { findPgBin, migrationsSql, startTempPg } from "../../../packages/db/test/pg-harness.ts";
 import { createApp } from "../src/app.ts";
 import { InProcessJobs } from "../src/jobs.ts";
@@ -78,6 +85,30 @@ const fakeCrawl = async (): Promise<CrawlResult> => ({
 
 const claude = process.env.ANTHROPIC_API_KEY ? new HttpClaudeClient({ apiKey: process.env.ANTHROPIC_API_KEY }) : sampleClaude(SAMPLE);
 const port = Number(process.env.PORT ?? 3000);
+
+/** OFFLINE STAND-IN (DEMO_FAKE_PUBLISH=1 only): accepts any app password; publishing stays dry-run anyway. */
+const offlineBluesky: ChannelAdapter<BlueskyCredential> = {
+  channel: "bluesky",
+  async publish() {
+    throw new Error("The demo never publishes");
+  },
+  async remove() {},
+  async check(c) {
+    return { ok: true, accountName: `@${c.identifier.replace(/^@/, "")}` };
+  },
+};
+const kek = new LocalKekProvider(randomBytes(32), "demo-kek");
+const safeFetch = createSafeFetch();
+const publisher: PublisherDeps = {
+  publisherDb: new PsqlDatabase(pg.conn, "publisher_user"),
+  keks: kek,
+  mode: "dry_run",
+  adapters: { bluesky: process.env.DEMO_FAKE_PUBLISH === "1" ? offlineBluesky : new BlueskyAdapter(safeFetch), facebook: null },
+  safeFetch,
+  log: (m, e) => console.error(m, e ?? ""),
+};
+const stopDispatcher = startDispatcher(publisher, 10_000);
+
 const handler = createApp({
   db,
   sessionSecret: randomBytes(32),
@@ -94,6 +125,7 @@ const handler = createApp({
     draft: (r) => runPostDraft({ client: claude, ledger }, r),
     review: (r) => runPostReview({ client: claude, ledger }, r),
   },
+  publishing: { mode: "dry_run", activeKek: kek, bluesky: publisher.adapters.bluesky, facebook: null, publisher },
 });
 
 const server = createServer((req, res) => void handler(req, res)).listen(port, () => {
@@ -104,6 +136,7 @@ const server = createServer((req, res) => void handler(req, res)).listen(port, (
 
 const shutdown = async () => {
   server.close();
+  stopDispatcher();
   await db.close();
   pg.stop();
   process.exit(0);

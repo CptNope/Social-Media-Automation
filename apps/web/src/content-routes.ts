@@ -26,6 +26,11 @@ import {
   updateSlot,
   upsertChannelSetting,
   getBrandWebsite,
+  globalPause,
+  integrationForChannel,
+  listItemPublications,
+  lockLiveItemPublication,
+  updatePublication,
   type ContentItemRow,
   type ContentStateName,
   type MemberRole,
@@ -37,6 +42,7 @@ import { HttpError, htmlResponse, redirect, type Req, type Res, type Router } fr
 import type { JobRunner } from "./jobs.ts";
 import type { Shell } from "./views/layout.ts";
 import * as C from "./views/content.ts";
+import { publishBlocker } from "./publisher.ts";
 
 export interface RouteCtx {
   s: { userId: string };
@@ -53,6 +59,8 @@ export interface RouteKit {
   idParam: (req: Req, name: string) => string;
   jobs: JobRunner;
   content: ContentJobDeps;
+  /** Publishing status for the post page (null: publishing not configured on this server). */
+  publishing: { mode: "live" | "dry_run" } | null;
 }
 
 const TZ = DEFAULT_TIMEZONE;
@@ -74,6 +82,10 @@ const FLASH: Record<string, { kind: "ok" | "error"; message: string }> = {
   exported: { kind: "ok", message: "Marked as posted." },
   stale: { kind: "error", message: "This post changed since you opened it. Review the current version and try again." },
   blocked: { kind: "error", message: "Fix the issues marked \"Must fix\" first." },
+  scheduled: { kind: "ok", message: "Scheduled. It goes through the final checks again at its time." },
+  unscheduled: { kind: "ok", message: "Unscheduled. The post is approved and can be scheduled again." },
+  sending: { kind: "error", message: "This post is being sent right now and can't be unscheduled." },
+  retrying: { kind: "ok", message: "Queued to publish again now." },
 };
 const flash = (req: Req) => {
   const k = req.url.searchParams.get("m") ?? "";
@@ -85,13 +97,13 @@ const forbid = (msg = "Your role doesn't allow this action."): never => {
 };
 
 /** Content item → state machine input. The approved hash is the latest approval of the current version. */
-async function machineState(tx: QueryClient, item: ContentItemRow): Promise<ContentItemState> {
+export async function machineState(tx: QueryClient, item: ContentItemRow): Promise<ContentItemState> {
   const approvals = await listApprovals(tx, item.id);
   const latest = approvals.find((a) => a.revisionId === item.currentRevisionId);
   return {
     state: item.state,
     contentHash: item.contentHash ?? "",
-    approvedHash: latest?.decision === "approved" && ["approved", "scheduled", "publishing"].includes(item.state) ? latest.contentHash : null,
+    approvedHash: latest?.decision === "approved" && ["approved", "scheduled", "publishing", "failed"].includes(item.state) ? latest.contentHash : null,
     pausedFrom: item.pausedFrom,
   };
 }
@@ -330,7 +342,15 @@ export function registerContentRoutes(kit: RouteKit): void {
     const d = await ctx.tx(async (q) => {
       const item = await getContentItem(q, id);
       if (!item) return null;
-      return { item, approvals: await listApprovals(q, id), tenant: (await getCurrentTenant(q))!, sensitive: await usesSensitiveClaims(q, item) };
+      return {
+        item,
+        approvals: await listApprovals(q, id),
+        tenant: (await getCurrentTenant(q))!,
+        sensitive: await usesSensitiveClaims(q, item),
+        publications: await listItemPublications(q, id),
+        integration: await integrationForChannel(q, item.channel),
+        global: await globalPause(q),
+      };
     });
     if (!d || !d.item.body) throw new HttpError(404, "Not found");
     const roles = approverRoles(d.tenant.automationMode, d.item.riskClass, d.sensitive);
@@ -344,6 +364,14 @@ export function registerContentRoutes(kit: RouteKit): void {
         canExport: MANAGE.includes(ctx.role),
         lintNow: [],
         canRecheck: EDIT.includes(ctx.role) && !!kit.content.ai,
+        publishing: {
+          status: { configured: !!kit.publishing, mode: kit.publishing?.mode ?? "dry_run", tenantPublishingEnabled: d.tenant.publishingEnabled, tenantPausedAt: d.tenant.pausedAt, globalPaused: d.global.paused },
+          publications: d.publications,
+          blocker: kit.publishing ? publishBlocker(d.item, d.integration) : "Publishing isn't configured on this server.",
+          accountName: d.integration?.displayName ?? null,
+          canSchedule: MANAGE.includes(ctx.role),
+          defaultAt: defaultScheduleTime(d.item.publishAt),
+        },
         ...(fl ? { flash: fl } : {}),
       }),
       status,
@@ -359,12 +387,16 @@ export function registerContentRoutes(kit: RouteKit): void {
   async function transitionItem(ctx: RouteCtx, itemId: string, build: (item: ContentItemRow, q: QueryClient) => Promise<Parameters<typeof transition>[1] | "stale" | "blocked">, extra?: (item: ContentItemRow, q: QueryClient) => Promise<void>): Promise<"ok" | "stale" | "blocked"> {
     try {
       return await ctx.tx(async (q) => {
+        // Same lock order as the publisher: the live publication, then the item.
+        const live = await lockLiveItemPublication(q, itemId);
         const item = await lockContentItem(q, itemId);
         if (!item) throw new HttpError(404, "Not found");
         const event = await build(item, q);
         if (event === "stale" || event === "blocked") return event;
         const { next, audit } = transition(await machineState(q, item), event, { type: "user", id: ctx.s.userId });
         await setContentState(q, itemId, next.state, next.pausedFrom);
+        // Sent back, rejected or posted by hand: a queued send for it must not go out (or block rescheduling).
+        if (live?.status === "queued" && next.state !== "scheduled") await updatePublication(q, live.id, { status: "cancelled", lastError: `Cancelled: ${audit.action.replace("content.", "").replace(/_/g, " ")}.` });
         if (extra) await extra(item, q);
         await appendAudit(q, ctx.tenantId, { actorType: "user", actorId: ctx.s.userId, action: audit.action, entityType: "content_item", entityId: itemId, before: audit.before, after: { ...audit.after, ...(audit.detail ?? {}) } });
         return "ok";
@@ -557,6 +589,13 @@ export function registerContentRoutes(kit: RouteKit): void {
     const body = [header, ...rows].map((r) => r.map((c) => csvCell(String(c))).join(",")).join("\r\n") + "\r\n";
     return { status: 200, headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="approved-posts-${localDate(new Date(), TZ)}.csv"` }, body: "﻿" + body };
   });
+}
+
+/** The slot's time if it's still ahead, otherwise the next whole hour (local date + time strings). */
+function defaultScheduleTime(publishAt: string | null): { date: string; time: string } {
+  const now = Date.now();
+  const at = publishAt && new Date(publishAt).getTime() > now + 5 * 60_000 ? new Date(publishAt) : new Date(Math.ceil((now + 60 * 60_000) / 3_600_000) * 3_600_000);
+  return { date: localDate(at, TZ), time: at.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: TZ }) };
 }
 
 const composeCaptionSafe = (p: PostDraft): string => composeCaption(p);

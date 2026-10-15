@@ -48,6 +48,7 @@ import type { JobRunner } from "./jobs.ts";
 import { runOnboarding, type OnboardingDeps } from "./onboarding.ts";
 import { registerContentRoutes } from "./content-routes.ts";
 import type { ContentAi } from "./content-jobs.ts";
+import { registerPublishingRoutes, type PublishingConfig } from "./publishing-routes.ts";
 import {
   RateLimiter,
   SECURITY_HEADERS,
@@ -79,6 +80,8 @@ export interface AppDeps {
   onboarding: Omit<OnboardingDeps, "db">;
   /** Planning, drafting and review agents; null when no API key is configured. */
   contentAi?: ContentAi | null;
+  /** Publishing (credentials, publisher connection, adapters); null/absent → export only. */
+  publishing?: PublishingConfig | null;
   /** Show the sign-in link on screen (development only; refused in production). */
   devShowLoginLinks?: boolean;
   production?: boolean;
@@ -463,7 +466,8 @@ export function createApp(deps: AppDeps) {
   });
 
   // ------------------------------------------------------------------------- planning & content
-  registerContentRoutes({ router, workspace, idParam, jobs: deps.jobs, content: { db, ai: deps.contentAi ?? null } });
+  registerContentRoutes({ router, workspace, idParam, jobs: deps.jobs, content: { db, ai: deps.contentAi ?? null }, publishing: deps.publishing ? { mode: deps.publishing.mode } : null });
+  registerPublishingRoutes({ router, workspace, idParam, requireUserId: async (req) => (await requireSession(req)).userId, config: deps.publishing ?? null, secureCookies });
 
   // ------------------------------------------------------------------------- claims
   async function renderClaims(ctx: Ctx, flash?: { kind: "ok" | "error"; message: string }, status = 200): Promise<Res> {

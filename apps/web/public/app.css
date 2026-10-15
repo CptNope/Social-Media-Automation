@@ -120,7 +120,7 @@ p { margin: 0 0 0.75rem; max-width: 70ch; }
 /* Forms ------------------------------------------------------------------ */
 label { display: block; font-weight: 600; margin-bottom: 4px; }
 .hint { display: block; font-weight: 400; color: var(--muted); font-size: 0.86rem; }
-input[type="text"], input[type="email"], input[type="url"], input[type="number"], textarea, select {
+input[type="text"], input[type="email"], input[type="url"], input[type="password"], input[type="number"], textarea, select {
   width: 100%;
   font: inherit;
   color: var(--ink);
@@ -278,3 +278,8 @@ ul.findings q { color: var(--muted); }
 details.panel > summary { cursor: pointer; }
 details.panel[open] > summary { margin-bottom: 12px; }
 .post-facts { margin-top: 14px; }
+
+/* Publishing */
+.schedule-form { align-items: flex-end; margin-bottom: 10px; }
+.schedule-form .field { margin-bottom: 0; flex: 0 1 180px; }
+code.secret { display: inline-block; padding: 6px 10px; border-radius: var(--radius-sm); background: var(--surface-2, rgba(127,127,127,.12)); font-size: 0.95rem; word-break: break-all; user-select: all; }

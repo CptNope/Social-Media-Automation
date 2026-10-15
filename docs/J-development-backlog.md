@@ -55,16 +55,21 @@ Each item is written to be pasted into a GitHub Issue or given to Claude Code. `
 - [ ] **JOB-0b** Durable queue: jobs survive restarts only as "interrupted" (15-minute heartbeat); move to pg-boss.
 
 ## Phase 4 — Publishing
-- [ ] **JOB-1** Worker with pg-boss: cron for due slots, retries, singleton keys.
-- [ ] **PUB-1** Publisher implementing the safety checks in `I-testing-security.md` §3.
-- [ ] **PUB-2** Pause controls (global/tenant/channel) + UI.
-- [ ] **WP-1** JAT Connector plugin: HMAC auth, `/jat/v1/health`, `/posts` draft/schedule.
-- [ ] **WP-2** SEO meta adapters for Yoast, Rank Math, AIOSEO + snapshots + rollback.
+- [~] **JOB-1** Publisher dispatcher: interval loop (30 s), due/stranded detection through the narrow `jat_scheduler` role, `FOR UPDATE SKIP LOCKED`, 4 at a time, backoff for retryable errors. Runs in-process (`JAT_PROCESS=all`) or as a separate worker. *Remaining:* pg-boss (durable jobs for AI work too).
+- [x] ✅ **PUB-1** Publisher implementing the safety checks in `I-testing-security.md` §3: re-checks approval of the exact content hash, final lint (expired claims), connection health, capability, pauses, publish mode and per-client enablement at send time; "publishing" committed before the API call; never auto-retries anything that may have reached the platform (timeouts/drops after sending, 5xx on create); stranded sends go to a person; late success handled; already-published posts never resent. End-to-end tests on real Postgres with fake platforms.
+- [x] ✅ **PUB-2** Pause controls: client and channel switches in the UI, global switch for admins (SQL); posts more than a day late after a pause aren't sent automatically.
+- [x] ✅ **WP-1** JAT Connector plugin: Application Password + HMAC signature (timestamp, single-use nonce), `/jat/v1/health`, `/posts` draft/schedule; only signed input is read. PHP unit tests + cross-language signature test. *Not yet run on a live WordPress site.*
+- [~] **WP-2** SEO meta read/update for Yoast, Rank Math, AIOSEO with change log + rollback in the plugin; client in `packages/integrations`. *Remaining:* meta keys UNVERIFIED on live sites; `wp_changes` mirror; UI.
 - [ ] **WP-3** Docker test matrix (WordPress + each SEO plugin) in CI.
-- [ ] **ADP-1** Facebook Pages adapter (OAuth, page selection, publish, schedule, delete, insights).
-- [ ] **ADP-2** Bluesky adapter (app password, posts with images and link facets).
-- [ ] **ADP-3** Export package (ZIP + CSV) + "mark as posted".
-- [ ] **INT-1** Connections page with live capability display and token health job.
+- [~] **ADP-1** Facebook Pages adapter: OAuth (state bound to browser + user, single use), long-lived token → Page tokens kept server-side, Page picker, publish text + link with `appsecret_proof`, delete, error classification. *Remaining:* live test with a JAT-owned Page (needs Meta App Review, SETUP-1); images; insights.
+- [~] **ADP-2** Bluesky adapter: app password, session cache (bounded, keyed by password), PDS from DID document over the SSRF-safe client, link cards, delete. *Remaining:* live test; images; link facets in text.
+- [~] **ADP-3** CSV export + "mark as posted" (also for failed sends that did go out). *Remaining:* ZIP with images (after CRE-1).
+- [~] **INT-1** Connections page: connect/test/pause/disconnect for Bluesky, Facebook, WordPress; recent publishing with failures; connection checks queued to the worker when the web process can't read credentials. *Remaining:* scheduled token-health job; Facebook token expiry warnings.
+- [ ] **VAULT-2** KMS-backed `KekProvider` (AWS KMS or GCP KMS); production refuses the local KEK today.
+- [ ] **PUB-3** Image posts (needs CRE-1 renderer); today visual-format posts can't be scheduled and are exported instead.
+- [ ] **PUB-4** Multi-replica web: Facebook OAuth state and Page picks live in process memory (single web replica only); move to the database or a signed, encrypted cookie.
+- [ ] **PUB-5** Plugin hardening: atomic nonce store; lock around the SEO change log.
+- [ ] **TZ-2** Scheduling UI uses US Eastern (with TZ-1).
 
 ## Phase 5 — Creative, SEO, reporting
 - [ ] **CRE-1** HTML template renderer (Playwright) with brand tokens; 1:1, 4:5, 9:16, 1.91:1 crops.

@@ -2,7 +2,7 @@
 
 An AI-powered, brand-aware marketing automation platform by **Jeremy Anderson Tech**. It learns a business's brand and verified facts once (Brand DNA + Claim Registry), then plans, drafts, quality-checks, schedules, publishes and reports on marketing across websites and social channels — with human approval wherever there's risk.
 
-> **Status:** Phases 1–3 built: foundation, AI layer, Brand DNA onboarding, planning calendar, AI drafting with checks, approvals and CSV export. The AI and crawler are tested with mocks only; they have not yet called the live Claude API or crawled a real site. Nothing publishes to any platform yet. No integration is claimed to work until its adapter passes staging tests.
+> **Status:** Phases 1–4 built: foundation, AI layer, Brand DNA onboarding, planning calendar, AI drafting with checks, approvals, CSV export, and publishing (scheduling, the publisher with its safety checks, pause switches, a Connections page with Bluesky, Facebook Pages and the WordPress connector plugin). Everything is tested against real Postgres with mocked platforms: **nothing has been sent to a live Bluesky, Facebook or WordPress account yet**, and the AI and crawler have not called the live Claude API or crawled a real site. Publishing stays in dry-run until both `PUBLISH_MODE=live` and a per-client admin switch are set. No integration is claimed to work until its adapter passes staging tests.
 
 ## Planning documents
 
@@ -32,8 +32,12 @@ packages/
   db/      SQL migrations with Postgres Row-Level Security; tenant-scoped transaction helper; AI cost ledger SQL
   ai/      Claude Messages API client, structured outputs, budget guard, skill loader, Brand DNA agent
   ingest/  Website crawler (robots.txt, SSRF-safe fetching) producing evidence for the agents
+  integrations/  Channel adapters: Bluesky, Facebook Pages (OAuth + publish), WordPress connector client
 apps/
-  web/     Dashboard: sign-in, client workspaces, Brand DNA, claims, plan + calendar, content, approvals, export
+  web/     Dashboard: sign-in, client workspaces, Brand DNA, claims, plan + calendar, content, approvals,
+           export, connections + scheduling; the publisher (dispatcher) runs in-process or as a worker
+wordpress-plugin/
+  jat-connector/  WordPress plugin: HMAC-signed REST API for drafts and SEO meta with rollback
 skills/    Agent Skills (SKILL.md) used by Claude Code and loaded as agent instructions
 docs/      Planning deliverables A–J and research
 ```
@@ -67,10 +71,18 @@ Database tests start a throwaway Postgres cluster automatically. If the binaries
 
 Copy `.env.example` to `.env` for local settings. `PUBLISH_MODE` defaults to `dry_run`; live publishing additionally requires a platform admin to enable publishing for each client.
 
+### Publishing
+
+- Run two processes in production: `JAT_PROCESS=web` (HTTP; can store credentials but never read them) and `JAT_PROCESS=worker` (the publisher; connects as a login role that is a member of `publisher_user` via `PUBLISHER_DATABASE_URL`). `JAT_PROCESS=all` is for development and is refused in production.
+- Credentials are envelope-encrypted. Only the development KEK (`LOCAL_KEK_BASE64`) exists today; a KMS-backed provider is required before production (backlog VAULT-2).
+- Facebook needs `FACEBOOK_APP_ID` / `FACEBOOK_APP_SECRET` and the redirect URI `{BASE_URL}/oauth/facebook/callback` registered in the Meta app (App Review for `pages_manage_posts` is SETUP-1).
+- In the demo, publishing is always dry-run. `DEMO_FAKE_PUBLISH=1` accepts any Bluesky app password so the screens can be explored offline.
+
 ## Safety principles (enforced in code, not prompts)
 
 - Tenant isolation is enforced by Postgres RLS; tests prove cross-tenant reads and writes fail.
 - Agents produce drafts only. They never hold credentials and cannot approve or publish.
 - Approvals are bound to a content hash; any edit invalidates them.
-- Global, client and channel pause switches block every publish.
+- Global, client and channel pause switches block every publish. A post that misses its time by more than a day while paused is not sent late; a person decides.
+- The publisher re-checks everything at send time (approval of the exact content hash, final lint, connection, pauses, mode) and never automatically retries a send that may have reached the platform.
 - Generated content may only state facts from the verified claim registry.

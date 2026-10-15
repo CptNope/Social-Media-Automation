@@ -57,7 +57,8 @@ function samplePlan(system: string, user: string) {
           date,
           time: i % 2 ? "12:15" : "09:30",
           channel: c.channel,
-          format: fmts.includes("image") ? "image" : fmts[0],
+          // Mix text and image posts so both publishing paths show up in the demo.
+          format: fmts.includes("image") && !(fmts.includes("text") && t % 2 === 1) ? "image" : fmts.includes("text") ? "text" : fmts[0],
           pillar_id: pillars[t % Math.max(1, pillars.length)] ?? "general",
           persona_id: personas[t % Math.max(1, personas.length)] ?? "general",
           objective: t % 3 === 2 ? "leads" : "engagement",

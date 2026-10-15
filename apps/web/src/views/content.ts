@@ -1,7 +1,8 @@
 import { CHANNELS, DEFAULT_TIMEZONE, PLATFORM_LIMITS, addDays, composeCaption, localDate, measureLength, type Finding, type PostDraft } from "@jat/core";
-import type { ApprovalRow, CampaignRow, ChannelSetting, ContentItemRow, SlotRow, WorkRun } from "@jat/db";
+import type { ApprovalRow, CampaignRow, ChannelSetting, ContentItemRow, PublicationRow, SlotRow, WorkRun } from "@jat/db";
 import { html, type Html } from "../html.ts";
 import { csrfField, notice, page, when, type Shell } from "./layout.ts";
+import { modeNotice, pubTag, type PublishingStatus } from "./publishing.ts";
 
 export const CHANNEL_LABELS: Record<string, string> = {
   facebook: "Facebook",
@@ -284,6 +285,61 @@ export interface ItemPageData {
   canRecheck: boolean;
   lintNow: Finding[];
   flash?: { kind: "ok" | "error"; message: string } | undefined;
+  publishing?: {
+    status: PublishingStatus;
+    publications: PublicationRow[];
+    /** Why this post can't be published automatically, or null. */
+    blocker: string | null;
+    accountName: string | null;
+    canSchedule: boolean;
+    defaultAt: { date: string; time: string };
+  };
+}
+
+function publishingPanel(shell: Shell, i: ContentItemRow, pb: NonNullable<ItemPageData["publishing"]>): Html {
+  const w = shell.workspace!;
+  const live = pb.publications.find((p) => p.status === "queued" || p.status === "publishing");
+  const last = pb.publications[0];
+  const show = ["approved", "scheduled", "publishing", "published", "failed"].includes(i.state) || pb.publications.length > 0;
+  if (!show) return html``;
+  const ambiguous = last?.status === "needs_attention" && /may have posted|may or may not|lost track/i.test(last.lastError ?? "");
+  return html`<section class="panel" id="publishing"><h2>Publishing</h2>
+${i.state === "approved" || i.state === "scheduled" ? modeNotice(pb.status) : ""}
+${
+  i.state === "approved" && pb.canSchedule
+    ? pb.blocker
+      ? html`<p class="muted">${pb.blocker}</p>`
+      : html`<p class="small muted">Publishes to <strong>${pb.accountName ?? ""}</strong>. Every check runs again right before sending.</p>
+<form method="post" action="/w/${w.id}/content/${i.id}/schedule" class="row schedule-form">${csrfField(shell.csrf)}<input type="hidden" name="fingerprint" value="${i.contentHash ?? ""}">
+  <div class="field"><label for="sd">Date</label><input id="sd" name="date" type="text" value="${pb.defaultAt.date}" pattern="\\d{4}-\\d{2}-\\d{2}" required></div>
+  <div class="field"><label for="st">Time <span class="hint">US Eastern, 24-hour</span></label><input id="st" name="time" type="text" value="${pb.defaultAt.time}" pattern="\\d{2}:\\d{2}" required></div>
+  <button type="submit">Schedule</button>
+</form>
+<form method="post" action="/w/${w.id}/content/${i.id}/schedule" class="row">${csrfField(shell.csrf)}<input type="hidden" name="fingerprint" value="${i.contentHash ?? ""}"><input type="hidden" name="now" value="1"><span class="small muted">or</span><button class="secondary" type="submit">Publish now</button></form>`
+    : ""
+}
+${
+  i.state === "scheduled" && live
+    ? html`<p>Scheduled for <strong>${when(live.scheduledFor)}</strong>${live.nextAttemptAt ? html` (next try ${when(live.nextAttemptAt)})` : ""}.${live.lastError ? html` <span class="small muted">${live.lastError}</span>` : ""}</p>
+${pb.canSchedule ? html`<form method="post" action="/w/${w.id}/content/${i.id}/unschedule">${csrfField(shell.csrf)}<button class="secondary" type="submit">Unschedule</button></form>` : ""}`
+    : ""
+}
+${
+  i.state === "failed" && pb.canSchedule
+    ? html`${ambiguous ? notice("warn", "The last attempt may have posted. Check the account before retrying, or mark it as posted.") : ""}
+<div class="row">${pb.blocker ? html`<p class="muted">${pb.blocker}</p>` : html`<form method="post" action="/w/${w.id}/content/${i.id}/retry">${csrfField(shell.csrf)}<button type="submit">Retry now</button></form>`}</div>`
+    : ""
+}
+${
+  pb.publications.length
+    ? html`<table><thead><tr><th>Attempt</th><th>Status</th><th>Details</th></tr></thead><tbody>
+${pb.publications.map(
+  (p) => html`<tr><td class="small">${when(p.publishedAt ?? p.scheduledFor ?? p.createdAt)}</td><td>${pubTag(p.status)}</td>
+  <td class="small">${p.permalink && /^https:\/\//.test(p.permalink) ? html`<a href="${p.permalink}" rel="noopener noreferrer" target="_blank">View post</a>` : ""}${p.lastError ? html`<div class="muted">${p.lastError}</div>` : ""}${p.attempts > 1 ? html`<div class="muted">${p.attempts} attempts</div>` : ""}</td></tr>`,
+)}</tbody></table>`
+    : ""
+}
+</section>`;
 }
 
 function findingList(findings: readonly Finding[] | ContentItemRow["findings"]): Html {
@@ -357,11 +413,12 @@ ${
       : ""
   }
   ${d.canRecheck && i.state === "draft" && !fromAi ? html`<form method="post" action="/w/${w.id}/content/${i.id}/recheck">${csrfField(shell.csrf)}<button class="secondary" type="submit">Re-check with AI</button></form>` : ""}
-  ${d.canExport && i.state === "approved" ? html`<form method="post" action="/w/${w.id}/content/${i.id}/exported">${csrfField(shell.csrf)}<button class="secondary" type="submit">Mark as posted manually</button></form>` : ""}
+  ${d.canExport && (i.state === "approved" || i.state === "failed") ? html`<form method="post" action="/w/${w.id}/content/${i.id}/exported">${csrfField(shell.csrf)}<button class="secondary" type="submit">${i.state === "failed" ? "It did post — mark as posted" : "Mark as posted manually"}</button></form>` : ""}
   <span class="small muted">${
-    i.state === "draft" && blockers ? `Fix ${blockers} issue${blockers === 1 ? "" : "s"} marked "Must fix" before sending for approval.` : i.state === "in_review" && !d.canApprove ? `Waiting for ${d.approverLabel}.` : i.state === "approved" ? "Approved. It's in the CSV export for manual posting." : ""
+    i.state === "draft" && blockers ? `Fix ${blockers} issue${blockers === 1 ? "" : "s"} marked "Must fix" before sending for approval.` : i.state === "in_review" && !d.canApprove ? `Waiting for ${d.approverLabel}.` : i.state === "approved" ? "Approved. Schedule it below, or use the CSV export to post it by hand." : ""
   }</span>
 </div>
+${d.publishing ? publishingPanel(shell, i, d.publishing) : ""}
 ${
   d.approvals.length
     ? html`<section class="panel"><h2>Decisions</h2><ul>${d.approvals.map((a) => html`<li>${when(a.decidedAt)}: ${a.decision === "approved" ? "Approved" : a.decision === "rejected" ? "Rejected" : "Changes requested"}${a.contentHash !== i.contentHash ? html` <span class="small muted">(an earlier version)</span>` : ""}${a.comment ? html` — <q>${a.comment}</q>` : ""}</li>`)}</ul></section>`

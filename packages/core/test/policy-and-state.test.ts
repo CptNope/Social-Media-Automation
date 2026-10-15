@@ -172,6 +172,19 @@ describe("content state machine", () => {
     assert.equal(transition(start({ state: "approved", approvedHash: "h1" }), { type: "mark_exported" }, user).next.state, "exported");
   });
 
+  it("unschedule returns to approved; retry re-queues only failed items whose approval still matches", () => {
+    assert.equal(transition(start({ state: "scheduled", approvedHash: "h1" }), { type: "unschedule" }, user).next.state, "approved");
+    assert.throws(() => transition(start({ state: "approved", approvedHash: "h1" }), { type: "unschedule" }, user), /not scheduled/);
+    assert.equal(transition(start({ state: "failed", approvedHash: "h1" }), { type: "retry_publish" }, user).next.state, "scheduled");
+    assert.throws(() => transition(start({ state: "failed", approvedHash: null }), { type: "retry_publish" }, user), /approval does not match/);
+    assert.throws(() => transition(start({ state: "published", approvedHash: "h1" }), { type: "retry_publish" }, user), /only failed/);
+    // A late success after the system gave up (stranded send) — system only.
+    assert.equal(transition(start({ state: "failed", approvedHash: "h1" }), { type: "publish_succeeded", externalId: "x" }, { type: "system", id: "publisher" }).next.state, "published");
+    assert.throws(() => transition(start({ state: "failed", approvedHash: "h1" }), { type: "publish_succeeded", externalId: "x" }, user), /not publishing/);
+    // A person confirms a failed (ambiguous) publish did go out.
+    assert.equal(transition(start({ state: "failed", approvedHash: "h1" }), { type: "mark_exported" }, user).next.state, "exported");
+  });
+
   it("cannot pause an item whose publish call is in flight", () => {
     assert.throws(() => transition(start({ state: "publishing", approvedHash: "h1" }), { type: "pause" }, user), /in flight/);
   });
