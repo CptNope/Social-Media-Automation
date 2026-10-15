@@ -102,28 +102,30 @@ if (processRole === "worker") {
 const ledger = new DbSpendLedger(db);
 const claude = env.ANTHROPIC_API_KEY ? new HttpClaudeClient({ apiKey: env.ANTHROPIC_API_KEY }) : null;
 
-const handler = createApp({
-  db,
-  sessionSecret: Buffer.from(required("SESSION_SECRET"), "base64"),
-  baseUrl: required("BASE_URL"),
-  mailer: consoleMailer,
-  jobs: new InProcessJobs(2),
-  production,
-  devShowLoginLinks: development && env.DEV_SHOW_LOGIN_LINKS === "1",
-  trustedProxies: Number(env.TRUSTED_PROXIES ?? 0),
-  onboarding: {
-    crawl: (opts) => crawlSite(opts),
-    extract: claude ? (input) => runBrandExtraction({ client: claude, ledger }, input) : null,
-  },
-  contentAi: claude
-    ? {
-        plan: (r) => runPlanning({ client: claude, ledger }, r),
-        draft: (r) => runPostDraft({ client: claude, ledger }, r),
-        review: (r) => runPostReview({ client: claude, ledger }, r),
-      }
-    : null,
-  publishing: publishingConfig,
-});
+if (processRole !== "worker") {
+  const handler = createApp({
+    db,
+    sessionSecret: Buffer.from(required("SESSION_SECRET"), "base64"),
+    baseUrl: required("BASE_URL"),
+    mailer: consoleMailer,
+    jobs: new InProcessJobs(2),
+    production,
+    devShowLoginLinks: development && env.DEV_SHOW_LOGIN_LINKS === "1",
+    trustedProxies: Number(env.TRUSTED_PROXIES ?? 0),
+    onboarding: {
+      crawl: (opts) => crawlSite(opts),
+      extract: claude ? (input) => runBrandExtraction({ client: claude, ledger }, input) : null,
+    },
+    contentAi: claude
+      ? {
+          plan: (r) => runPlanning({ client: claude, ledger }, r),
+          draft: (r) => runPostDraft({ client: claude, ledger }, r),
+          review: (r) => runPostReview({ client: claude, ledger }, r),
+        }
+      : null,
+    publishing: publishingConfig,
+  });
 
-const port = Number(env.PORT ?? 3000);
-if (processRole !== "worker") createServer((req, res) => void handler(req, res)).listen(port, () => console.log(`JAT Marketing OS listening on ${env.BASE_URL} (port ${port})`));
+  const port = Number(env.PORT ?? 3000);
+  createServer((req, res) => void handler(req, res)).listen(port, () => console.log(`JAT Marketing OS listening on ${env.BASE_URL} (port ${port})`));
+}
