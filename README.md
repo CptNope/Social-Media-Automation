@@ -2,7 +2,7 @@
 
 An AI-powered, brand-aware marketing automation platform by **Jeremy Anderson Tech**. It learns a business's brand and verified facts once (Brand DNA + Claim Registry), then plans, drafts, quality-checks, schedules, publishes and reports on marketing across websites and social channels — with human approval wherever there's risk.
 
-> **Status:** Phase 1 (Foundation) in progress. Nothing publishes to any platform yet. No integration is claimed to work until its adapter passes staging tests.
+> **Status:** Phase 1 (Foundation) done; Phase 2 (AI layer & Brand DNA) in progress — the AI and crawler code is tested with mocks only; it has not yet called the live Claude API or crawled a real site. Nothing publishes to any platform yet. No integration is claimed to work until its adapter passes staging tests.
 
 ## Planning documents
 
@@ -29,7 +29,9 @@ packages/
            PostDraft schema, platform limits, deterministic content linter,
            approval policy + publish gate, content state machine, hashing, UTM
   vault/   Envelope encryption for platform credentials (AES-256-GCM, KMS-wrapped keys)
-  db/      SQL migrations with Postgres Row-Level Security; tenant-scoped transaction helper
+  db/      SQL migrations with Postgres Row-Level Security; tenant-scoped transaction helper; AI cost ledger SQL
+  ai/      Claude Messages API client, structured outputs, budget guard, skill loader, Brand DNA agent
+  ingest/  Website crawler (robots.txt, SSRF-safe fetching) producing evidence for the agents
 skills/    Agent Skills (SKILL.md) used by Claude Code and loaded as agent instructions
 docs/      Planning deliverables A–J and research
 ```

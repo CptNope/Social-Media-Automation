@@ -1,6 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { findPgBin, migrationsSql, startTempPg, type TempPg } from "./pg-harness.ts";
+import { INSERT_AGENT_RUN_SQL, MONTH_TO_DATE_SPEND_SQL } from "../src/index.ts";
 
 const bin = findPgBin();
 const A = "11111111-1111-4111-8111-111111111111";
@@ -199,6 +200,21 @@ describe("Postgres tenant isolation (RLS)", { skip: bin ? false : "Postgres serv
       INSERT INTO audit_log (tenant_id, actor_type, actor_id, action, entity_type, entity_id) VALUES ('33333333-3333-4333-8333-333333333333', 'system', 't', 'x', 'tenant', 'gone');
       DELETE FROM tenants WHERE slug = 'gone';`);
     assert.equal(pg.admin("SELECT count(*) FROM audit_log WHERE tenant_id = '33333333-3333-4333-8333-333333333333'"), "1");
+  });
+
+  it("AI cost ledger: append-only, month-to-date spend per tenant and per UTC month", () => {
+    const prep = `PREPARE ins AS ${INSERT_AGENT_RUN_SQL}; PREPARE mtd AS ${MONTH_TO_DATE_SPEND_SQL};`;
+    const ok = pg.asApp(`${prep} EXECUTE ins('${A}', 'brand-dna-extraction', 'claude-opus-5-5', 'h', 1, 1, 0, 250000, 10, 'succeeded', NULL, NULL);`, { tenantId: A });
+    assert.equal(ok.ok, true, ok.err);
+    pg.admin(`UPDATE agent_runs SET created_at = '2026-10-15T10:00:00Z';
+      INSERT INTO agent_runs (tenant_id, agent, model, input_hash, cost_micros, status, created_at) VALUES
+        ('${A}', 'a', 'm', 'h', 1000000, 'succeeded', '2026-10-01T00:00:00Z'),
+        ('${A}', 'a', 'm', 'h', 9000000, 'succeeded', '2026-09-30T23:59:59Z'),
+        ('${B}', 'a', 'm', 'h', 5000000, 'succeeded', '2026-10-10T00:00:00Z');`);
+    assert.equal(pg.asApp(`${prep} EXECUTE mtd('2026-10-15T12:00:00Z');`, { tenantId: A }).out, "1250000");
+    assert.equal(pg.asApp(`${prep} EXECUTE mtd('2026-10-15T12:00:00Z');`, { tenantId: B }).out, "5000000");
+    assert.match(pg.asApp(`${prep} EXECUTE ins('${B}', 'x', 'm', 'h', 0, 0, 0, 0, 0, 'succeeded', NULL, NULL);`, { tenantId: A }).err, /row-level security/);
+    assert.match(pg.asApp("UPDATE agent_runs SET cost_micros = 0;", { tenantId: A }).err, /permission denied/);
   });
 
   it("publication idempotency keys are unique", () => {

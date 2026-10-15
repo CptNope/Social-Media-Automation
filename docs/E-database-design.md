@@ -10,7 +10,7 @@ PostgreSQL 16+. The executable source of truth is `packages/db/migrations/0001_i
 - `FORCE ROW LEVEL SECURITY` is enabled so even the table owner is subject to policies; migrations run as a separate `migrator` role.
 - Platform-level tables: `tenants` (the app can read its own row and update only operational columns — name, mode, pause; gating flags like `publishing_enabled`, `autonomous_eligible` and budgets are admin-only), `users` (read: yourself and members of the current workspace; created by invitation tooling), `platform_settings` (read-only to the app; global pause is admin-only).
 - Roles: `app_user` (web + worker, no credential reads), `publisher_user` (inherits `app_user` and may read/update `credentials`), and the migration owner. None has `BYPASSRLS`.
-- Append-only by grant: `content_revisions`, `approvals`, `audit_log`. `brand_dna_versions` cannot be deleted and active versions are immutable (trigger).
+- Append-only by grant: `content_revisions`, `approvals`, `audit_log`, `agent_runs` (AI cost ledger). `brand_dna_versions` cannot be deleted and active versions are immutable (trigger).
 - Cross-row integrity uses composite foreign keys that include `tenant_id` (and the owning item), so a row can never reference another tenant's — or another item's — data.
 
 ## 2. Entity overview

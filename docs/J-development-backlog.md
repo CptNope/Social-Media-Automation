@@ -29,13 +29,14 @@ Each item is written to be pasted into a GitHub Issue or given to Claude Code. `
 - [ ] **CORE-10** Near-duplicate detection (character shingles + Jaccard) for hooks/bodies over 60-day window.
 
 ## Phase 2 — AI & Brand DNA
-- [ ] **AI-1** `packages/ai`: Anthropic client wrapper with structured outputs, zod re-validation, one repair retry, prompt caching of brand block. *AC:* unit tests with mocked SDK.
-- [ ] **AI-2** Cost ledger + per-tenant budget guard (reject before call when projected spend > remaining budget).
-- [ ] **AI-3** Skill loader: reads `skills/<name>/SKILL.md` + references into system prompt; snapshot test.
-- [ ] **AI-4** Brand agent using `brand-dna-extraction`; fixture eval on 5 businesses.
-- [ ] **INGEST-1** robots.txt-aware crawler (≤50 pages, same-origin, 1 req/s), extract text, CSS colors and font families.
+- [x] ✅ **AI-1** `packages/ai`: Messages API client over fetch (no SDK dependency), native structured outputs with a wire-schema converter that enforces the documented limits, zod re-validation, one repair turn, prompt caching (instructions, tenant context, user content), refusal/max_tokens handling, retry policy (no retry on timeouts).
+- [x] ✅ **AI-2** Cost ledger + per-tenant budget guard, serialized per tenant so parallel jobs can't overspend; append-only `agent_runs` with month-to-date SQL tested on Postgres.
+- [ ] **AI-2b** Postgres `SpendLedger` adapter (advisory lock + `insertAgentRun`) wired to a real `pg` pool.
+- [x] ✅ **AI-3** Skill loader with frontmatter validation; every repo skill is tested.
+- [~] **AI-4** Brand agent using `brand-dna-extraction`: flat wire schema (29 fields, no unions) rebuilt into Brand DNA, grounding checks (unknown sources, values/quotes not found in sources), injection-safe evidence rendering. *Remaining:* live eval on 5 real businesses (needs an API key; nothing has been sent to the real API yet).
+- [x] ✅ **INGEST-1** Crawler: RFC 9309 robots.txt per origin, SSRF guard (incl. IPv4-in-IPv6 forms) with DNS-pinned sockets, per-hop redirect checks, request/queue caps, linear-time HTML extraction, colors + fonts, evidence chunks. *Not yet run against live websites.*
 - [ ] **INGEST-2** PDF brand-book extraction (text + embedded color values) into `sources`.
-- [ ] **WEB-1** Next.js app shell, Auth.js (magic link + Google), workspace switcher, roles middleware.
+- [ ] **WEB-1** *(blocked in the build sandbox: npm registry unreachable, so Next.js can't be installed there)* Next.js app shell, Auth.js (magic link + Google), workspace switcher, roles middleware.
 - [ ] **WEB-2** Brand DNA diff & field-by-field approval UI.
 - [ ] **WEB-3** Claims & evidence UI.
 

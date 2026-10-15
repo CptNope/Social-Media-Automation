@@ -68,6 +68,10 @@ skills/
 .claude/skills -> ../skills            # symlink so Claude Code discovers them
 ```
 
-## 5. Quality loop for skills
+## 5. Structured-output limits shape the agent contracts
+
+The Messages API enforces per-request limits on structured-output schemas (≤ 24 optional properties, ≤ 16 properties using `anyOf`/type arrays; no `minLength`/`maximum`/records). Brand DNA alone has 29 nullable fields, so agents use a **flat wire schema** (e.g. one row per field with a JSON-encoded value) that `packages/ai` rebuilds into the canonical zod schema and validates. `toWireSchema()` fails fast if a schema would exceed the limits.
+
+## 6. Quality loop for skills
 - `packages/ai/test/fixtures/<skill>/` holds golden inputs. CI runs **schema tests** (no API) on every PR and a **nightly eval** (with API, low budget) scoring outputs on: schema validity, linter blockers, claim grounding, brand-voice rubric (LLM-as-judge with Haiku), length compliance.
 - Any change to a `SKILL.md` must not reduce the eval score by more than 2 points on any metric.

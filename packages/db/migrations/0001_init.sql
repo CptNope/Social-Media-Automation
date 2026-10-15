@@ -330,7 +330,7 @@ CREATE TABLE agent_runs (
   input_tokens   integer NOT NULL DEFAULT 0,
   output_tokens  integer NOT NULL DEFAULT 0,
   cached_tokens  integer NOT NULL DEFAULT 0,
-  cost_micros    bigint NOT NULL DEFAULT 0,  -- USD * 1e6
+  cost_micros    bigint NOT NULL DEFAULT 0 CHECK (cost_micros >= 0),  -- USD * 1e6
   latency_ms     integer,
   status         text NOT NULL CHECK (status IN ('succeeded','failed','rejected_budget')),
   output         jsonb,
@@ -426,11 +426,11 @@ GRANT USAGE ON SCHEMA public TO app_user, publisher_user;
 -- Mutable tenant data.
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   brands, sources, claims, campaigns, calendar_slots, content_items, assets,
-  integrations, publications, metric_points, agent_runs, wp_changes
+  integrations, publications, metric_points, wp_changes
 TO app_user;
 
--- Append-only / immutable records: revisions and approvals are never edited, only added.
-GRANT SELECT, INSERT ON content_revisions, approvals, audit_log TO app_user;
+-- Append-only / immutable records: revisions, approvals, the audit log and the AI cost ledger.
+GRANT SELECT, INSERT ON content_revisions, approvals, audit_log, agent_runs TO app_user;
 -- Brand DNA: insert proposals, update status (trigger enforces immutability), never delete.
 GRANT SELECT, INSERT, UPDATE ON brand_dna_versions TO app_user;
 

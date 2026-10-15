@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v4";
 
 /**
  * Claim & evidence registry. A claim is a factual statement the business is

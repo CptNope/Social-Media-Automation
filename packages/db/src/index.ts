@@ -67,3 +67,43 @@ export async function appendAudit(tx: QueryClient, tenantId: string, e: AuditEnt
     [tenantId, e.actorType, e.actorId, e.action, e.entityType, e.entityId, JSON.stringify(e.before ?? null), JSON.stringify(e.after ?? null)],
   );
 }
+
+// ---------------------------------------------------------------------------
+// AI cost ledger (backs @jat/ai SpendLedger). Call inside withTenant — RLS scopes rows.
+// ---------------------------------------------------------------------------
+
+/** $1 = now (timestamptz). Sums the current tenant's spend since the start of the UTC calendar month (no upper bound, so app/DB clock skew can't hide recent spend). */
+export const MONTH_TO_DATE_SPEND_SQL = `SELECT COALESCE(SUM(cost_micros), 0)::bigint AS micros
+  FROM agent_runs
+  WHERE created_at >= (date_trunc('month', $1::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`;
+
+export const INSERT_AGENT_RUN_SQL = `INSERT INTO agent_runs
+  (tenant_id, agent, model, input_hash, input_tokens, output_tokens, cached_tokens, cost_micros, latency_ms, status, output, error)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)`;
+
+export interface AgentRunRow {
+  tenantId: string;
+  agent: string;
+  model: string;
+  inputHash: string;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  costMicros: number;
+  latencyMs: number;
+  status: "succeeded" | "failed" | "rejected_budget";
+  output?: unknown;
+  error?: string;
+}
+
+export async function monthToDateSpendMicros(tx: QueryClient, now: Date): Promise<number> {
+  const { rows } = await tx.query<{ micros: string | number }>(MONTH_TO_DATE_SPEND_SQL, [now.toISOString()]);
+  return Number(rows[0]?.micros ?? 0);
+}
+
+export async function insertAgentRun(tx: QueryClient, run: AgentRunRow): Promise<void> {
+  await tx.query(INSERT_AGENT_RUN_SQL, [
+    run.tenantId, run.agent, run.model, run.inputHash, run.inputTokens, run.outputTokens, run.cachedTokens,
+    run.costMicros, run.latencyMs, run.status, run.output === undefined ? null : JSON.stringify(run.output), run.error ?? null,
+  ]);
+}
