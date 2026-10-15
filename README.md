@@ -2,7 +2,7 @@
 
 An AI-powered, brand-aware marketing automation platform by **Jeremy Anderson Tech**. It learns a business's brand and verified facts once (Brand DNA + Claim Registry), then plans, drafts, quality-checks, schedules, publishes and reports on marketing across websites and social channels — with human approval wherever there's risk.
 
-> **Status:** Phase 1 (Foundation) done; Phase 2 (AI layer & Brand DNA) in progress — the AI and crawler code is tested with mocks only; it has not yet called the live Claude API or crawled a real site. Nothing publishes to any platform yet. No integration is claimed to work until its adapter passes staging tests.
+> **Status:** Phase 1 (Foundation) and Phase 2 (AI layer, Brand DNA onboarding, dashboard) built. The AI and crawler are tested with mocks only; they have not yet called the live Claude API or crawled a real site. Nothing publishes to any platform yet. No integration is claimed to work until its adapter passes staging tests.
 
 ## Planning documents
 
@@ -32,18 +32,36 @@ packages/
   db/      SQL migrations with Postgres Row-Level Security; tenant-scoped transaction helper; AI cost ledger SQL
   ai/      Claude Messages API client, structured outputs, budget guard, skill loader, Brand DNA agent
   ingest/  Website crawler (robots.txt, SSRF-safe fetching) producing evidence for the agents
+apps/
+  web/     Dashboard: sign-in, client workspaces, Brand DNA onboarding and review, claims
 skills/    Agent Skills (SKILL.md) used by Claude Code and loaded as agent instructions
 docs/      Planning deliverables A–J and research
 ```
 
 ## Development
 
-Requirements: Node 22+, pnpm 10, PostgreSQL 16 server binaries (for DB tests).
+Requirements: Node 22+, pnpm 10, PostgreSQL 16 server binaries (for DB tests and the demo).
 
 ```bash
 pnpm install
-pnpm check          # typecheck + all tests
+pnpm check                       # typecheck + all tests
+pnpm --filter @jat/web demo      # local demo on http://localhost:3000
 ```
+
+The demo starts a throwaway Postgres, seeds two clients and three people, and shows sign-in links on screen. Sign in as `ops@jat.example` (agency operator) to draft Brand DNA, then as `owner@acme.example` to approve it. Without `ANTHROPIC_API_KEY` it uses a canned sample AI response; with a key it crawls the real website and calls Claude.
+
+### Running the app
+
+```bash
+NODE_ENV=production \
+DATABASE_URL=postgres://app_user:...@host/db \
+SESSION_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64'))") \
+BASE_URL=https://app.example.com \
+ANTHROPIC_API_KEY=... \
+pnpm --filter @jat/web start
+```
+
+Apply `packages/db/migrations/*.sql` in order as the schema owner first. The app must connect as `app_user` (no `BYPASSRLS`). Production sign-in email delivery is not wired up yet (backlog AUTH-2).
 
 Database tests start a throwaway Postgres cluster automatically. If the binaries aren't on a standard path, set `PG_BIN` (e.g. `PG_BIN=/usr/lib/postgresql/16/bin`). Without them, the DB suite is skipped, not failed.
 

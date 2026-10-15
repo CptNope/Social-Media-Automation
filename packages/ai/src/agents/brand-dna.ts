@@ -119,7 +119,9 @@ export function assembleBrandProposal(wire: BrandWire): BrandProposal {
       problems.push(`${spec.path}: ${v.error.issues.map((i) => `${i.path.join(".") || "value"} ${i.message}`).join("; ")}`);
       continue;
     }
-    dna[section][key] = { value: v.data, sources: row.sources, confidence: row.confidence, status: row.status };
+    // "user:<id>" citations are reserved for human edits; a model (or injected page text) can't claim them.
+    const sources = row.sources.filter((s) => !s.startsWith("user:"));
+    dna[section][key] = { value: v.data, sources, confidence: row.confidence, status: row.status };
   }
   if (problems.length) throw new BrandAssemblyError(problems.join("\n"));
   return {

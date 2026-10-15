@@ -9,7 +9,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "tsx --test \"packages/*/test/**/*.test.ts\"",
+    "test": "tsx --test \"packages/*/test/**/*.test.ts\" \"apps/*/test/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "npm run typecheck && npm test"
   },

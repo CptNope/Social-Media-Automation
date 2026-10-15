@@ -12,6 +12,16 @@ export interface QueryClient {
   query<R = unknown>(text: string, params?: unknown[]): Promise<{ rows: R[] }>;
 }
 
+/** A pooled connection (pg.PoolClient-compatible). */
+export interface PooledClient extends QueryClient {
+  release(): void;
+}
+
+/** Connection pool (pg.Pool-compatible subset). */
+export interface Database {
+  connect(): Promise<PooledClient>;
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function assertUuid(value: string, label = "id"): string {
@@ -107,3 +117,55 @@ export async function insertAgentRun(tx: QueryClient, run: AgentRunRow): Promise
     run.costMicros, run.latencyMs, run.status, run.output === undefined ? null : JSON.stringify(run.output), run.error ?? null,
   ]);
 }
+
+/** Acquire a connection, run `fn` in a tenant-scoped transaction, release. */
+export async function inTenant<T>(db: Database, scope: TenantScope, fn: (tx: QueryClient) => Promise<T>): Promise<T> {
+  const client = await db.connect();
+  try {
+    return await withTenant(client, scope, fn);
+  } finally {
+    client.release();
+  }
+}
+
+/** Transaction with only the user set (no tenant): used to list a user's workspaces. */
+export async function inUser<T>(db: Database, userId: string, fn: (tx: QueryClient) => Promise<T>): Promise<T> {
+  assertUuid(userId, "userId");
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    try {
+      await client.query("SELECT set_config('app.tenant_id', '', true)");
+      await client.query("SELECT set_config('app.user_id', $1, true)", [userId]);
+      const r = await fn(client);
+      await client.query("COMMIT");
+      return r;
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/** Transaction with no tenant or user (only SECURITY DEFINER auth functions are usable). */
+export async function inAnonymous<T>(db: Database, fn: (tx: QueryClient) => Promise<T>): Promise<T> {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    try {
+      const r = await fn(client);
+      await client.query("COMMIT");
+      return r;
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    }
+  } finally {
+    client.release();
+  }
+}
+
+export * from "./store.ts";
+export * from "./ledger.ts";

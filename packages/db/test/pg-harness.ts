@@ -14,6 +14,8 @@ export function findPgBin(): string | undefined {
 }
 
 export interface TempPg {
+  /** Connection details for additional clients (see testing/psql-client.ts). */
+  conn: { bin: string; host: string; port: string; user: string; database: string };
   /** Run SQL as the superuser (setup). Returns stdout (-At format). */
   admin(sql: string): string;
   /** Run SQL as app_user inside one transaction scoped to a tenant (and optional user). */
@@ -38,6 +40,7 @@ export function startTempPg(bin: string): TempPg {
     spawnSync(join(bin, "psql"), ["-h", dir, "-p", port, "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-X", "-q", "-At"], { input: sql, encoding: "utf8" });
 
   return {
+    conn: { bin, host: dir, port, user: "postgres", database: "postgres" },
     admin(sql) {
       const r = psql(sql);
       if (r.status !== 0) throw new Error(`psql failed: ${r.stderr}`);

@@ -6,14 +6,14 @@
 |---|---|---|---|
 | Language | **TypeScript everywhere** (Node 22 LTS) | One language for UI, API, workers, schemas; zod schemas shared between AI output validation and API validation | Python workers (second toolchain for a small team) |
 | Repo | **pnpm monorepo** | Shared `core` domain package; atomic changes across web/worker | Polyrepo |
-| Web | **Next.js (App Router)** | Server components for dashboard, route handlers for BFF API, good auth ecosystem | SPA + separate API (more surface for MVP) |
+| Web | **Server-rendered HTML on `node:http`, no framework** (MVP, built Oct 2026) | Zero runtime dependencies, no client JavaScript, strict CSP (`default-src 'none'`), forms + redirects work everywhere; every view is a typed function returning escaped HTML. Revisit **Next.js** when the planner/calendar needs rich client interactivity (drag-and-drop) | Next.js first (more moving parts; also couldn't be installed in the build sandbox, which had no npm registry access) |
 | Database | **PostgreSQL 16+ with Row-Level Security** | Tenant isolation enforced by the database; JSONB for Brand DNA; mature backups | Separate DB per tenant (ops overhead), MongoDB |
 | Data access | **SQL-first migrations** now; **Drizzle** typed query layer from Phase 2 | RLS policies, triggers and grants are clearest as reviewed SQL; Drizzle stays SQL-close and works with transaction-local settings | Prisma (RLS + session variables are awkward) |
 | Jobs | **pg-boss** (Postgres-backed queue) | Cron, retries, backoff, singleton keys, no Redis to run in MVP; jobs are transactional with domain writes | BullMQ + Redis (add later if throughput needs it), n8n (see review §2 #9), Temporal (heavy for MVP) |
 | Object storage | **S3-compatible** (Cloudflare R2 or AWS S3) | Brand assets, rendered creatives, export packages; signed URLs for platforms that require public media URLs | DB blobs |
 | AI | **Anthropic Messages API** with native structured outputs, prompt caching, Batches for bulk jobs | Deterministic JSON contracts per agent; cost control | Managed Agents for tenant data (not ZDR-eligible, $0.08/session-hr); Agent SDK in production (full Claude Code harness is more power than a tenant job should have) |
 | Secrets | **Envelope encryption**: a fresh AES-256-GCM data key per secret, wrapped by a KMS key (AWS KMS / GCP KMS; local key in dev); AAD binds each ciphertext to tenant + integration | Copied rows can't be decrypted under another tenant; KEK rotation only re-wraps data keys | Plain env vars, DB encryption only |
-| Auth | Auth.js (email magic link + Google/Microsoft OIDC) | Clients review without passwords | Custom auth |
+| Auth | Magic links (hashed, single-use, 15 min; issued by SECURITY DEFINER functions) + HMAC-signed session cookie with revocation epoch; OIDC later | Clients review without passwords; small, auditable surface | Auth.js (needs Next.js) |
 | Rendering | HTML/CSS templates → PNG via headless Chromium (Playwright) in the worker | Exact typography & brand tokens; text never drawn by an image model | AI image models for text |
 | Hosting (MVP) | Managed Postgres (e.g. Neon/RDS) + 2 containers (web, worker) on Fly.io/Render/ECS + R2 | ~$60–150/mo total at pilot scale, no Kubernetes | Self-hosted k8s |
 
@@ -26,10 +26,10 @@ flowchart LR
     CL[Client owner / reviewer]
   end
 
-  subgraph Web["apps/web (Next.js)"]
-    UI[Dashboard UI]
+  subgraph Web["apps/web (node:http, server-rendered)"]
+    UI[Dashboard UI\nserver-rendered]
     RV[Client review portal]
-    API[Route handlers / BFF]
+    API[Form routes]
     OAUTH[OAuth callback handlers]
   end
 

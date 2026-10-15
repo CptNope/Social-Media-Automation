@@ -36,9 +36,13 @@ Each item is written to be pasted into a GitHub Issue or given to Claude Code. `
 - [~] **AI-4** Brand agent using `brand-dna-extraction`: flat wire schema (29 fields, no unions) rebuilt into Brand DNA, grounding checks (unknown sources, values/quotes not found in sources), injection-safe evidence rendering. *Remaining:* live eval on 5 real businesses (needs an API key; nothing has been sent to the real API yet).
 - [x] ✅ **INGEST-1** Crawler: RFC 9309 robots.txt per origin, SSRF guard (incl. IPv4-in-IPv6 forms) with DNS-pinned sockets, per-hop redirect checks, request/queue caps, linear-time HTML extraction, colors + fonts, evidence chunks. *Not yet run against live websites.*
 - [ ] **INGEST-2** PDF brand-book extraction (text + embedded color values) into `sources`.
-- [ ] **WEB-1** *(blocked in the build sandbox: npm registry unreachable, so Next.js can't be installed there)* Next.js app shell, Auth.js (magic link + Google), workspace switcher, roles middleware.
-- [ ] **WEB-2** Brand DNA diff & field-by-field approval UI.
-- [ ] **WEB-3** Claims & evidence UI.
+- [x] ✅ **WEB-1** App shell (server-rendered, no framework — see B §1), magic-link sign-in, signed sessions with sign-out-everywhere, CSRF + Origin checks, security headers, workspace switcher, role checks. 159 tests incl. end-to-end flows on real Postgres; screenshots reviewed in Chromium (light, dark, mobile).
+- [ ] **AUTH-2** Production email delivery for sign-in links (Postmark/SES/Resend) — `main.ts` refuses to send in production until configured.
+- [ ] **AUTH-3** Google/Microsoft OIDC sign-in; MFA for operators.
+- [ ] **WEB-1b** Verify `pg-database.ts` (node-postgres adapter) in CI against Postgres — not runnable in the build sandbox.
+- [ ] **JOB-0** Durable jobs: in-process queue loses runs on restart; mark interrupted runs failed on boot and move to pg-boss (JOB-1).
+- [x] ✅ **WEB-2** Brand DNA onboarding (crawl → AI proposal) and field-by-field review: provenance per field, confirm/edit, activation only by the owner, blocked until inferred fields are confirmed, approval bound to a content fingerprint, row-locked activation. *Remaining:* side-by-side diff against the previous version.
+- [x] ✅ **WEB-3** Claims registry UI: add with evidence, owner-only verification, rejection, expiry dates; onboarding suggests claims whose quotes were found verbatim.
 
 ## Phase 3 — Plan, studio, approvals
 - [ ] **AI-5** Planning agent (`campaign-planning`), 30-day plan.
