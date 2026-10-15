@@ -145,6 +145,7 @@ export function transition(current: ContentItemState, event: ContentEvent, actor
 
     case "mark_exported":
       if (s !== "approved" && s !== "scheduled") fail("only approved items can be exported");
+      if (current.approvedHash !== current.contentHash) fail("approval does not match current content");
       next.state = "exported";
       break;
 

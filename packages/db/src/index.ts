@@ -169,3 +169,4 @@ export async function inAnonymous<T>(db: Database, fn: (tx: QueryClient) => Prom
 
 export * from "./store.ts";
 export * from "./ledger.ts";
+export * from "./content-store.ts";

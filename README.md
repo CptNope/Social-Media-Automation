@@ -2,7 +2,7 @@
 
 An AI-powered, brand-aware marketing automation platform by **Jeremy Anderson Tech**. It learns a business's brand and verified facts once (Brand DNA + Claim Registry), then plans, drafts, quality-checks, schedules, publishes and reports on marketing across websites and social channels — with human approval wherever there's risk.
 
-> **Status:** Phase 1 (Foundation) and Phase 2 (AI layer, Brand DNA onboarding, dashboard) built. The AI and crawler are tested with mocks only; they have not yet called the live Claude API or crawled a real site. Nothing publishes to any platform yet. No integration is claimed to work until its adapter passes staging tests.
+> **Status:** Phases 1–3 built: foundation, AI layer, Brand DNA onboarding, planning calendar, AI drafting with checks, approvals and CSV export. The AI and crawler are tested with mocks only; they have not yet called the live Claude API or crawled a real site. Nothing publishes to any platform yet. No integration is claimed to work until its adapter passes staging tests.
 
 ## Planning documents
 
@@ -33,7 +33,7 @@ packages/
   ai/      Claude Messages API client, structured outputs, budget guard, skill loader, Brand DNA agent
   ingest/  Website crawler (robots.txt, SSRF-safe fetching) producing evidence for the agents
 apps/
-  web/     Dashboard: sign-in, client workspaces, Brand DNA onboarding and review, claims
+  web/     Dashboard: sign-in, client workspaces, Brand DNA, claims, plan + calendar, content, approvals, export
 skills/    Agent Skills (SKILL.md) used by Claude Code and loaded as agent instructions
 docs/      Planning deliverables A–J and research
 ```
@@ -48,7 +48,7 @@ pnpm check                       # typecheck + all tests
 pnpm --filter @jat/web demo      # local demo on http://localhost:3000
 ```
 
-The demo starts a throwaway Postgres, seeds two clients and three people, and shows sign-in links on screen. Sign in as `ops@jat.example` (agency operator) to draft Brand DNA, then as `owner@acme.example` to approve it. Without `ANTHROPIC_API_KEY` it uses a canned sample AI response; with a key it crawls the real website and calls Claude.
+The demo starts a throwaway Postgres, seeds two clients and three people, and shows sign-in links on screen. Sign in as `ops@jat.example` (agency operator) to draft Brand DNA, then as `owner@acme.example` to approve it. Then, as the operator, turn on channels on the Plan page, draft a plan, approve it and draft the posts; approve them as the owner and download the CSV. Without `ANTHROPIC_API_KEY` it uses a canned sample AI response; with a key it crawls the real website and calls Claude.
 
 ### Running the app
 

@@ -46,6 +46,8 @@ import { applyFieldAction, fieldSpec, parseEditorInput, versionIssues } from "./
 import { HttpError, Router, htmlResponse, parseCookies, readForm, redirect, send, serializeCookie, text, type Req, type Res } from "./http.ts";
 import type { JobRunner } from "./jobs.ts";
 import { runOnboarding, type OnboardingDeps } from "./onboarding.ts";
+import { registerContentRoutes } from "./content-routes.ts";
+import type { ContentAi } from "./content-jobs.ts";
 import {
   RateLimiter,
   SECURITY_HEADERS,
@@ -75,6 +77,8 @@ export interface AppDeps {
   mailer: Mailer;
   jobs: JobRunner;
   onboarding: Omit<OnboardingDeps, "db">;
+  /** Planning, drafting and review agents; null when no API key is configured. */
+  contentAi?: ContentAi | null;
   /** Show the sign-in link on screen (development only; refused in production). */
   devShowLoginLinks?: boolean;
   production?: boolean;
@@ -457,6 +461,9 @@ export function createApp(deps: AppDeps) {
     });
     return redirect(`/w/${ctx.tenantId}/brand/versions/${versionId}?m=${ok ? "rejected" : "stale"}`);
   });
+
+  // ------------------------------------------------------------------------- planning & content
+  registerContentRoutes({ router, workspace, idParam, jobs: deps.jobs, content: { db, ai: deps.contentAi ?? null } });
 
   // ------------------------------------------------------------------------- claims
   async function renderClaims(ctx: Ctx, flash?: { kind: "ok" | "error"; message: string }, status = 200): Promise<Res> {

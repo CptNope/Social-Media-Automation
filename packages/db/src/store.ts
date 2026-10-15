@@ -360,6 +360,11 @@ const RUN_COLS = `id, brand_id, status, website_url, business, started_by, dna_v
 
 /** The brand's queued/crawling/extracting run, if any (at most one; enforced by a unique index). */
 export async function activeOnboardingRun(tx: QueryClient, brandId: string): Promise<OnboardingRun | null> {
+  await tx.query(
+    `UPDATE onboarding_runs SET status = 'failed', error = 'Interrupted (the server restarted). Start it again.', finished_at = now()
+     WHERE brand_id = $1 AND status IN ('queued', 'crawling', 'extracting') AND updated_at < now() - interval '15 minutes' RETURNING id`,
+    [brandId],
+  );
   const { rows } = await tx.query<Record<string, unknown>>(`SELECT ${RUN_COLS} FROM onboarding_runs WHERE brand_id = $1 AND status IN ('queued', 'crawling', 'extracting') LIMIT 1`, [brandId]);
   return rows[0] ? runFromRow(rows[0]) : null;
 }
@@ -407,7 +412,7 @@ export async function updateOnboardingRun(
   if (patch.costMicros !== undefined) add("cost_micros", patch.costMicros);
   if (patch.error !== undefined) add("error", patch.error);
   if (patch.finished) sets.push("finished_at = now()");
-  if (!sets.length) return;
+  sets.push("updated_at = now()");
   await tx.query(`UPDATE onboarding_runs SET ${sets.join(", ")} WHERE id = $1`, params);
 }
 

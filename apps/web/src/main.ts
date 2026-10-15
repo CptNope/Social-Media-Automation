@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { HttpClaudeClient, runBrandExtraction } from "@jat/ai";
+import { HttpClaudeClient, runBrandExtraction, runPlanning, runPostDraft, runPostReview } from "@jat/ai";
 import { DbSpendLedger, type Database } from "@jat/db";
 import { crawlSite } from "@jat/ingest";
 import { createApp, type Mailer } from "./app.ts";
@@ -61,6 +61,13 @@ const handler = createApp({
     crawl: (opts) => crawlSite(opts),
     extract: claude ? (input) => runBrandExtraction({ client: claude, ledger }, input) : null,
   },
+  contentAi: claude
+    ? {
+        plan: (r) => runPlanning({ client: claude, ledger }, r),
+        draft: (r) => runPostDraft({ client: claude, ledger }, r),
+        review: (r) => runPostReview({ client: claude, ledger }, r),
+      }
+    : null,
 });
 
 const port = Number(env.PORT ?? 3000);

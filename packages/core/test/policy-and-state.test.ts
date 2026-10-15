@@ -167,6 +167,11 @@ describe("content state machine", () => {
     assert.equal(vetoed.approvedHash, null);
   });
 
+  it("export requires an approval of the current content", () => {
+    assert.throws(() => transition(start({ state: "approved", approvedHash: "old" }), { type: "mark_exported" }, user), /approval does not match/);
+    assert.equal(transition(start({ state: "approved", approvedHash: "h1" }), { type: "mark_exported" }, user).next.state, "exported");
+  });
+
   it("cannot pause an item whose publish call is in flight", () => {
     assert.throws(() => transition(start({ state: "publishing", approvedHash: "h1" }), { type: "pause" }, user), /in flight/);
   });

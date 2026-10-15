@@ -61,6 +61,8 @@ erDiagram
 | `audit_log` | tenant_id, actor_type (`user`/`agent`/`system`), actor_id, action, entity_type, entity_id, before JSONB, after JSONB, ip, created_at | Append-only (UPDATE/DELETE revoked); no FK to tenants so history survives tenant deletion |
 | `login_tokens` | token_hash (sha256), user_id, expires_at, used_at | No app-role access; only `issue_login_token()` / `consume_login_token()` (SECURITY DEFINER). Single use, 15 min; only the 5 newest unused tokens per user stay valid |
 | `onboarding_runs` | tenant_id, brand_id, status, website_url, business, started_by, dna_version_id, findings, conflicts, missing_info, crawl_summary, cost_micros, error | One unfinished run per brand (partial unique index) |
+| `channel_settings` | tenant_id, brand_id, channel, enabled, posts_per_week | Cadence caps used by the planner |
+| `work_runs` | tenant_id, brand_id, kind (plan/draft), campaign_id, status, input, progress, error, updated_at | One active run per brand and kind; stale runs (no heartbeat for 15 min) are marked interrupted |
 | `wp_changes` | tenant_id, integration_id, wp_post_id, change_id, fields text[], before JSONB, after JSONB, rolled_back_at | Mirror of plugin snapshots |
 
 ## 4. Content state machine

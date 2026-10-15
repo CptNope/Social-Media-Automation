@@ -45,12 +45,14 @@ Each item is written to be pasted into a GitHub Issue or given to Claude Code. `
 - [x] ✅ **WEB-3** Claims registry UI: add with evidence, owner-only verification, rejection, expiry dates; onboarding suggests claims whose quotes were found verbatim.
 
 ## Phase 3 — Plan, studio, approvals
-- [ ] **AI-5** Planning agent (`campaign-planning`), 30-day plan.
-- [ ] **WEB-4** Calendar month/week/day with drag-and-drop rescheduling.
-- [ ] **AI-6** Post drafting agent (`social-post-drafting`) + QA agent (`compliance-review`).
-- [ ] **APPR-1** Approval service (hash binding, batch approve excluding high risk).
-- [ ] **WEB-5** Client review portal via magic link.
-- [ ] **E2E-1** Playwright: plan → draft → approve → edit invalidates approval.
+- [x] ✅ **AI-5** Planning agent (`campaign-planning`): 30/60/90-day plans; every slot validated in code (dates, enabled channels, formats, pillars, personas, weekly caps, registered offers), soft warnings for pillar/promo balance.
+- [x] ✅ **WEB-4** Channel settings, month calendar, campaign page with move/remove before drafting. *Remaining:* week/day views and drag-and-drop.
+- [x] ✅ **AI-6** Drafting agent (`social-post-drafting`, slot-fixed fields + UTM links built in code) and AI reviewer (`compliance-review`); deterministic lint on every version; AI blockers carry over human edits until "Re-check with AI".
+- [x] ✅ **APPR-1** Approvals bound to content hashes; batch approve skips high risk and changed posts; posts using testimonial/statistic/award claims are owner-only; request changes with comments; CSV export (formula-safe) and "mark as posted".
+- [x] ✅ **WEB-5** Client review: owners and reviewers sign in with magic links and use the Approvals page (no separate portal needed).
+- [x] ✅ **E2E-1** End-to-end test on real Postgres: plan → approve → draft → batch approve → edit invalidates approval → re-check → export.
+- [ ] **TZ-1** Per-client time zone (currently US Eastern for everyone); spring-forward non-existent times map to the hour before.
+- [ ] **JOB-0b** Durable queue: jobs survive restarts only as "interrupted" (15-minute heartbeat); move to pg-boss.
 
 ## Phase 4 — Publishing
 - [ ] **JOB-1** Worker with pg-boss: cron for due slots, retries, singleton keys.

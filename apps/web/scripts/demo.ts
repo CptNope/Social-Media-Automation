@@ -10,7 +10,8 @@
  */
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
-import { HttpClaudeClient, runBrandExtraction, type ClaudeClient } from "@jat/ai";
+import { HttpClaudeClient, runBrandExtraction, runPlanning, runPostDraft, runPostReview } from "@jat/ai";
+import { sampleClaude } from "../src/sample-ai.ts";
 import { DbSpendLedger } from "@jat/db";
 import { PsqlDatabase } from "@jat/db/testing/psql-client";
 import { crawlSite, type CrawlResult } from "@jat/ingest";
@@ -53,6 +54,8 @@ const SAMPLE = {
     { path: "strategy.offerings", value_json: JSON.stringify([{ name: "Furnace tune-up", description: "Annual furnace safety check and cleaning" }, { name: "Emergency plumbing", description: "Burst pipes, leaks and blocked drains" }]), sources: ["web:/"], confidence: "high", status: "extracted" },
     { path: "strategy.geo_targets", value_json: '["Worcester","Shrewsbury","Grafton"]', sources: ["web:/"], confidence: "high", status: "extracted" },
     { path: "identity.founded_year", value_json: "null", sources: [], confidence: "low", status: "missing" },
+    { path: "strategy.pillars", value_json: JSON.stringify([{ id: "home-care-tips", name: "Home care tips", description: "Practical seasonal maintenance advice", proof_claim_ids: [] }, { id: "behind-the-scenes", name: "Behind the scenes", description: "The technicians and how they work", proof_claim_ids: [] }, { id: "services", name: "Services", description: "What Acme does and when to call", proof_claim_ids: [] }]), sources: ["web:/"], confidence: "medium", status: "inferred" },
+    { path: "strategy.personas", value_json: JSON.stringify([{ id: "new-homeowner", name: "New homeowner", description: "First house, unsure what needs maintenance", goals: ["Avoid surprise repairs"], objections: ["Worried about upselling"], channels: ["facebook", "instagram"] }, { id: "busy-parent", name: "Busy parent", description: "Needs quick, reliable fixes", goals: ["Fast scheduling"], objections: ["Price"], channels: ["facebook", "google_business_profile"] }]), sources: ["web:/"], confidence: "medium", status: "inferred" },
   ],
   candidate_claims: [{ text: "Licensed in Massachusetts", category: "credential", quote: "Licensed in Massachusetts", source_id: "web:/" }],
   conflicts: [],
@@ -60,11 +63,6 @@ const SAMPLE = {
 };
 const HOME = "Acme Plumbing & Heating. Warm homes, dry basements. Licensed in Massachusetts. Serving Worcester, Shrewsbury and Grafton from our shop at 12 Main St, Worcester, MA. Furnace tune-up. Emergency plumbing. Book a visit. Call us.";
 
-const sampleClaude: ClaudeClient = {
-  async createMessage(req) {
-    return { id: "demo", model: req.model, stop_reason: "end_turn", content: [{ type: "text", text: JSON.stringify(SAMPLE) }], usage: { input_tokens: 12_000, output_tokens: 2_500 } };
-  },
-};
 const fakeCrawl = async (): Promise<CrawlResult> => ({
   pages: [{ url: "https://acme.example/", status: 200, page: { title: "Acme", metaDescription: "", canonical: null, robotsMeta: null, h1: [], h2: [], text: HOME, links: [], stylesheets: [], colors: [], fonts: [], imagesMissingAlt: 0 } }],
   skipped: [],
@@ -78,7 +76,7 @@ const fakeCrawl = async (): Promise<CrawlResult> => ({
   ],
 });
 
-const claude = process.env.ANTHROPIC_API_KEY ? new HttpClaudeClient({ apiKey: process.env.ANTHROPIC_API_KEY }) : sampleClaude;
+const claude = process.env.ANTHROPIC_API_KEY ? new HttpClaudeClient({ apiKey: process.env.ANTHROPIC_API_KEY }) : sampleClaude(SAMPLE);
 const port = Number(process.env.PORT ?? 3000);
 const handler = createApp({
   db,
@@ -91,12 +89,17 @@ const handler = createApp({
     crawl: process.env.DEMO_FAKE_CRAWL === "1" || !process.env.ANTHROPIC_API_KEY ? fakeCrawl : (o) => crawlSite(o),
     extract: (input) => runBrandExtraction({ client: claude, ledger }, input),
   },
+  contentAi: {
+    plan: (r) => runPlanning({ client: claude, ledger }, r),
+    draft: (r) => runPostDraft({ client: claude, ledger }, r),
+    review: (r) => runPostReview({ client: claude, ledger }, r),
+  },
 });
 
 const server = createServer((req, res) => void handler(req, res)).listen(port, () => {
   console.log(`\nJAT Marketing OS demo: http://localhost:${port}`);
   console.log("Sign in as ops@jat.example (operator), owner@acme.example (owner) or editor@acme.example (editor).");
-  console.log(process.env.ANTHROPIC_API_KEY ? "Using the real Claude API and real website crawl." : "No ANTHROPIC_API_KEY: Draft Brand DNA uses a canned sample response.");
+  console.log(process.env.ANTHROPIC_API_KEY ? "Using the real Claude API and real website crawl." : "No ANTHROPIC_API_KEY: AI steps use an offline sample model (canned, schema-valid output).");
 });
 
 const shutdown = async () => {
