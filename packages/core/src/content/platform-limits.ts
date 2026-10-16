@@ -23,18 +23,37 @@ export interface PlatformLimits {
   formats: ReadonlyArray<"text" | "image" | "carousel" | "video" | "story" | "video_script" | "article">;
   verified: boolean;
   notes?: string;
+  /** Media our adapter can publish to this channel (absent: text only for now). */
+  apiMedia?: { image?: ImageRule; video?: VideoRule };
 }
 
+export interface ImageRule {
+  mimes: readonly string[];
+  maxBytes: number;
+  /** width / height bounds (inclusive). */
+  minAspect?: number;
+  maxAspect?: number;
+}
+
+export interface VideoRule {
+  mimes: readonly string[];
+  maxBytes: number;
+  minMs?: number;
+  maxMs?: number;
+}
+
+const MB = 1024 * 1024;
+
 export const PLATFORM_LIMITS: Record<Channel, PlatformLimits> = {
-  facebook: { maxChars: 63206, countBy: "chars", maxHashtags: 30, linksClickable: true, formats: ["text", "image", "carousel", "video", "story", "video_script"], verified: false },
-  instagram: { maxChars: 2200, countBy: "chars", maxHashtags: 30, linksClickable: false, formats: ["image", "carousel", "video", "story", "video_script"], verified: false, notes: "Carousel up to 10 items (verified); JPEG images only via API." },
+  facebook: { maxChars: 63206, countBy: "chars", maxHashtags: 30, linksClickable: true, formats: ["text", "image", "carousel", "video", "story", "video_script"], verified: false, apiMedia: { image: { mimes: ["image/jpeg", "image/png"], maxBytes: 10 * MB } } },
+  instagram: { maxChars: 2200, countBy: "chars", maxHashtags: 30, linksClickable: false, formats: ["image", "carousel", "video", "story", "video_script"], verified: false, notes: "Carousel up to 10 items (verified); JPEG images only via API.", apiMedia: { image: { mimes: ["image/jpeg"], maxBytes: 8 * MB, minAspect: 0.8, maxAspect: 1.91 }, video: { mimes: ["video/mp4", "video/quicktime"], maxBytes: 300 * MB, minMs: 3_000, maxMs: 15 * 60_000 } } },
   linkedin: { maxChars: 3000, countBy: "chars", maxHashtags: 30, linksClickable: true, formats: ["text", "image", "video", "article"], verified: false, notes: "Organic carousels not supported via Posts API (verified)." },
   threads: { maxChars: 500, countBy: "chars", maxHashtags: 1, maxLinks: 5, linksClickable: true, formats: ["text", "image", "carousel", "video"], verified: true, notes: "500 characters and 5 links/post verified 2026-10; Threads counts emoji by UTF-8 bytes (not modelled)." },
-  bluesky: { maxChars: 300, countBy: "graphemes", maxHashtags: 30, linksClickable: true, formats: ["text", "image", "video"], verified: false },
+  bluesky: { maxChars: 300, countBy: "graphemes", maxHashtags: 30, linksClickable: true, formats: ["text", "image", "video"], verified: false, apiMedia: { image: { mimes: ["image/jpeg", "image/png", "image/webp"], maxBytes: 1_000_000 } } },
   x: { maxChars: 280, countBy: "x_weighted", linkInText: true, maxHashtags: 30, linksClickable: true, formats: ["text", "image", "video"], verified: true, notes: "280 weighted characters, URLs count 23 (verified 2026-10). Pay-per-use: $0.015 per post, $0.20 with a URL." },
-  pinterest: { maxChars: 500, countBy: "chars", maxHashtags: 20, linksClickable: true, formats: ["image", "video"], verified: false },
-  tiktok: { maxChars: 2200, countBy: "chars", maxHashtags: 30, linksClickable: false, formats: ["video", "image", "video_script"], verified: false },
-  youtube: { maxChars: 5000, countBy: "chars", maxHashtags: 15, linksClickable: true, formats: ["video", "video_script"], verified: false },
+  pinterest: { maxChars: 500, countBy: "chars", maxHashtags: 20, linksClickable: true, formats: ["image", "video"], verified: false, apiMedia: { image: { mimes: ["image/jpeg", "image/png"], maxBytes: 20 * MB }, video: { mimes: ["video/mp4", "video/quicktime"], maxBytes: 1024 * MB } } },
+  tiktok: { maxChars: 2200, countBy: "chars", maxHashtags: 30, linksClickable: false, formats: ["video", "image", "video_script"], verified: false, apiMedia: { video: { mimes: ["video/mp4", "video/quicktime", "video/webm"], maxBytes: 4096 * MB, minMs: 1_000, maxMs: 10 * 60_000 } } },
+  youtube: { maxChars: 5000, countBy: "chars", maxHashtags: 15, linksClickable: true, formats: ["video", "video_script"], verified: false, apiMedia: { video: { mimes: ["video/mp4", "video/quicktime", "video/webm"], maxBytes: 4096 * MB } } },
   google_business_profile: { maxChars: 1500, countBy: "chars", maxHashtags: 0, linksClickable: true, formats: ["text", "image"], verified: false },
   wordpress: { maxChars: Number.MAX_SAFE_INTEGER, countBy: "chars", maxHashtags: 0, linksClickable: true, formats: ["article"], verified: true },
 };
@@ -97,7 +116,12 @@ export function measureLength(text: string, countBy: PlatformLimits["countBy"]):
 }
 
 /** The exact text a platform receives: the caption, plus the link where the link travels inside the text (X). */
-export function publishedText(post: Pick<PostDraft, "channel" | "hook" | "body" | "cta" | "hashtags" | "disclosure" | "link">): string {
+export function publishedText(post: Pick<PostDraft, "channel" | "hook" | "body" | "cta" | "hashtags" | "disclosure" | "link" | "media">): string {
   const caption = composeCaption(post);
-  return PLATFORM_LIMITS[post.channel].linkInText && post.link ? `${caption}\n\n${post.link.url}` : caption;
+  return linkGoesInText(post) && post.link ? `${caption}\n\n${post.link.url}` : caption;
+}
+
+/** X always carries the link in the text; Bluesky does when an image takes the place of the link card. */
+export function linkGoesInText(post: Pick<PostDraft, "channel" | "media">): boolean {
+  return !!PLATFORM_LIMITS[post.channel].linkInText || (post.channel === "bluesky" && !!post.media?.length);
 }

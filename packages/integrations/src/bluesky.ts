@@ -19,6 +19,13 @@ interface Session {
 }
 
 const ENTRYWAY = "https://bsky.social";
+
+/** A rich-text link facet: UTF-8 byte offsets of the (last) occurrence of the URL in the text. */
+export function linkFacet(text: string, url: string): { index: { byteStart: number; byteEnd: number }; features: Array<{ $type: string; uri: string }> } {
+  const at = text.lastIndexOf(url);
+  const byteStart = Buffer.byteLength(text.slice(0, at));
+  return { index: { byteStart, byteEnd: byteStart + Buffer.byteLength(url) }, features: [{ $type: "app.bsky.richtext.facet#link", uri: url }] };
+}
 /** Sessions are cached per identifier *and* password, so a wrong password never reuses someone's session. */
 const cacheKey = (c: BlueskyCredential): string => `${c.identifier.toLowerCase()}\u0000${createHash("sha256").update(c.appPassword).digest("hex")}`;
 const graphemes = (s: string): number => [...new Intl.Segmenter("en", { granularity: "grapheme" }).segment(s)].length;
@@ -93,10 +100,14 @@ export class BlueskyAdapter implements ChannelAdapter<BlueskyCredential> {
   }
 
   /** Authenticated call with one refresh-and-retry on expired tokens. */
-  async #call(cred: BlueskyCredential, nsid: string, body: unknown): Promise<unknown> {
+  async #call(cred: BlueskyCredential, nsid: string, body: unknown, raw?: { bytes: Buffer; mime: string }): Promise<unknown> {
     let s = this.#sessions.get(cacheKey(cred)) ?? (await this.#login(cred));
     for (let attempt = 0; attempt < 2; attempt++) {
-      const res = await timedFetch(this.fetchImpl, `${s.pds}/xrpc/${nsid}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${s.accessJwt}` }, body: JSON.stringify(body) });
+      const init: RequestInit = raw
+        ? { method: "POST", headers: { "content-type": raw.mime, authorization: `Bearer ${s.accessJwt}` }, body: new Uint8Array(raw.bytes) }
+        : { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${s.accessJwt}` }, body: JSON.stringify(body) };
+      // Uploading a blob publishes nothing, so it's safe to repeat; createRecord is not.
+      const res = await timedFetch(this.fetchImpl, `${s.pds}/xrpc/${nsid}`, init, { idempotent: nsid !== "com.atproto.repo.createRecord" && nsid !== "com.atproto.repo.deleteRecord" });
       if (res.ok) return res.json();
       const err = await xrpcError(res);
       // A server error on createRecord may still have written the post: never auto-retry it.
@@ -111,10 +122,20 @@ export class BlueskyAdapter implements ChannelAdapter<BlueskyCredential> {
   }
 
   async publish(post: PublishablePost, cred: BlueskyCredential): Promise<PublishResult> {
-    const text = post.text.trim();
+    const caption = post.text.trim();
+    // With an image, the image takes the embed slot, so the link goes in the text (with a link facet).
+    const text = post.media && post.link ? `${caption}\n\n${post.link.url}` : caption;
     if (graphemes(text) > 300) throw new PublishError("permanent", `Bluesky posts are limited to 300 characters; this one has ${graphemes(text)}.`);
     const record: Record<string, unknown> = { $type: "app.bsky.feed.post", text, createdAt: new Date().toISOString(), langs: ["en"] };
-    if (post.link) {
+    if (post.media) {
+      const m = post.media;
+      if (m.kind !== "image") throw new PublishError("permanent", "Bluesky video posts aren't supported yet; export this post instead.");
+      if (m.size > 1_000_000) throw new PublishError("permanent", "Bluesky images must be under 1 MB.");
+      const up = (await this.#call(cred, "com.atproto.repo.uploadBlob", null, { bytes: await m.bytes(), mime: m.mime })) as { blob?: unknown };
+      if (!up?.blob) throw new PublishError("transient", "Bluesky didn't accept the image upload.");
+      record.embed = { $type: "app.bsky.embed.images", images: [{ alt: (m.altText ?? "").slice(0, 2000), image: up.blob, ...(m.width && m.height ? { aspectRatio: { width: m.width, height: m.height } } : {}) }] };
+      if (post.link) record.facets = [linkFacet(text, post.link.url)];
+    } else if (post.link) {
       record.embed = { $type: "app.bsky.embed.external", external: { uri: post.link.url, title: post.link.title.slice(0, 300), description: post.link.description.slice(0, 1000) } };
     }
     const s = this.#sessions.get(cacheKey(cred)) ?? (await this.#login(cred));

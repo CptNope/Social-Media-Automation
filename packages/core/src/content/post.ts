@@ -10,6 +10,23 @@ export type PostFormat = z.infer<typeof PostFormatSchema>;
 
 export const VerificationStatusSchema = z.enum(["verified", "needs_verification", "no_factual_claims"]);
 
+/**
+ * An image or video attached to a post. It lives in the post body, so the content hash — and
+ * therefore every approval — covers exactly this file (by its SHA-256). Replacing it is an edit.
+ */
+export const PostMediaSchema = z.object({
+  asset_id: z.string().uuid(),
+  kind: z.enum(["image", "video"]),
+  mime: z.string().min(3),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  bytes: z.number().int().positive(),
+  width: z.number().int().positive().nullable(),
+  height: z.number().int().positive().nullable(),
+  duration_ms: z.number().int().nonnegative().nullable(),
+  origin: z.enum(["uploaded", "rendered"]),
+});
+export type PostMedia = z.infer<typeof PostMediaSchema>;
+
 export const PostDraftSchema = z.object({
   channel: ChannelSchema,
   format: PostFormatSchema,
@@ -30,6 +47,8 @@ export const PostDraftSchema = z.object({
     })
     .nullable(),
   alt_text: z.string().nullable(),
+  /** One image or video for now (carousels later). Absent on text posts and posts drafted before media existed. */
+  media: z.array(PostMediaSchema).max(1).optional(),
   publish_window: z.object({ start: z.string().datetime({ offset: true }), end: z.string().datetime({ offset: true }) }),
   link: z.object({ url: z.string().url() }).nullable(),
   expected_kpi: z.object({ metric: z.string().min(1), target: z.string().optional(), rationale: z.string().optional() }),

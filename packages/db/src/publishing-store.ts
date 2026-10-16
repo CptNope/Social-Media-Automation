@@ -189,6 +189,7 @@ export interface PublicationRow {
   permalink: string | null;
   attempts: number;
   lastError: string | null;
+  note: string | null;
   scheduledFor: string | null;
   nextAttemptAt: string | null;
   publishedAt: string | null;
@@ -198,7 +199,7 @@ export interface PublicationRow {
   hook?: string | null;
 }
 
-const PUB_COLS = "p.id, p.content_item_id, p.revision_id, p.integration_id, p.idempotency_key, p.status, p.external_id, p.permalink, p.attempts, p.last_error, p.scheduled_for, p.next_attempt_at, p.published_at, p.created_at, p.updated_at";
+const PUB_COLS = "p.id, p.content_item_id, p.revision_id, p.integration_id, p.idempotency_key, p.status, p.external_id, p.permalink, p.attempts, p.last_error, p.note, p.scheduled_for, p.next_attempt_at, p.published_at, p.created_at, p.updated_at";
 const pub = (r: Record<string, unknown>): PublicationRow => ({
   id: r.id as string,
   contentItemId: r.content_item_id as string,
@@ -210,6 +211,7 @@ const pub = (r: Record<string, unknown>): PublicationRow => ({
   permalink: (r.permalink as string | null) ?? null,
   attempts: Number(r.attempts),
   lastError: (r.last_error as string | null) ?? null,
+  note: (r.note as string | null) ?? null,
   scheduledFor: iso(r.scheduled_for),
   nextAttemptAt: iso(r.next_attempt_at),
   publishedAt: iso(r.published_at),
@@ -265,7 +267,7 @@ export async function lockLiveItemPublication(tx: QueryClient, itemId: string): 
 export async function updatePublication(
   tx: QueryClient,
   id: string,
-  patch: { status?: PublicationStatus; externalId?: string; permalink?: string | null; attemptsIncrement?: boolean; lastError?: string | null; nextAttemptAt?: string | null; published?: boolean },
+  patch: { status?: PublicationStatus; externalId?: string; permalink?: string | null; attemptsIncrement?: boolean; lastError?: string | null; nextAttemptAt?: string | null; published?: boolean; note?: string | null },
 ): Promise<void> {
   const sets: string[] = ["updated_at = now()"];
   const params: unknown[] = [id];
@@ -278,6 +280,7 @@ export async function updatePublication(
   if (patch.permalink !== undefined) add("permalink", patch.permalink);
   if (patch.attemptsIncrement) sets.push("attempts = attempts + 1");
   if (patch.lastError !== undefined) add("last_error", patch.lastError);
+  if (patch.note !== undefined) add("note", patch.note);
   if (patch.nextAttemptAt !== undefined) add("next_attempt_at", patch.nextAttemptAt, "::timestamptz");
   if (patch.published) sets.push("published_at = now()");
   await tx.query(`UPDATE publications SET ${sets.join(", ")} WHERE id = $1 RETURNING id`, params);

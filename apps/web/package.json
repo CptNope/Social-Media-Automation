@@ -14,6 +14,7 @@
     "@jat/db": "workspace:*",
     "@jat/ingest": "workspace:*",
     "@jat/integrations": "workspace:*",
+    "@jat/media": "workspace:*",
     "@jat/vault": "workspace:*",
     "pg": "^8.16.0",
     "zod": "^3.25.0"

@@ -172,6 +172,7 @@ describe("publishing: connections, scheduling, the publisher and its safety chec
       publisherDb,
       keks: kek,
       activeKek: kek,
+      media: null,
       mode: "dry_run",
       adapters: { bluesky: bsky, facebook },
       safeFetch: wpFetch,
@@ -511,13 +512,13 @@ describe("publishing: connections, scheduling, the publisher and its safety chec
     assert.deepEqual(await dispatch(), ["blocked"]);
     assert.match(pg.admin(`SELECT last_error FROM publications WHERE content_item_id = '${twice}' AND status = 'needs_attention'`), /already published/);
 
-    // Image posts can't be scheduled until the renderer exists; channels without an adapter export only.
+    // Image posts need their image attached (and approved) before they can be scheduled; non-social channels export only.
     const img = seedApproved({ hook: "Picture this.", format: "image", creative_brief: { template: "tip-card", headline: "x" }, alt_text: "A pipe" });
     p = await op.get(`/w/${T}/content/${img}`);
-    assert.match(p.body, /designed around an image/);
+    assert.match(p.body, /Add the image in the Media section first/);
     assert.equal((await op.post(`/w/${T}/content/${img}/schedule`, { now: "1", fingerprint: fingerprint(p.body) }, p.body)).status, 400);
-    const ig = seedApproved({ hook: "Instagram.", channel: "instagram", format: "image", creative_brief: { template: "tip-card", headline: "x" }, alt_text: "A pipe", link: null });
-    p = await op.get(`/w/${T}/content/${ig}`);
+    const wp = seedApproved({ hook: "Blog.", channel: "wordpress", format: "article", link: null });
+    p = await op.get(`/w/${T}/content/${wp}`);
     assert.match(p.body, /isn&#39;t available for this channel yet/);
     const li = seedApproved({ hook: "LinkedIn.", channel: "linkedin", link: { url: "https://acme.example/?utm_source=linkedin&utm_medium=social&utm_campaign=w" } });
     p = await op.get(`/w/${T}/content/${li}`);

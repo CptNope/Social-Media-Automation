@@ -409,3 +409,54 @@ export async function recentHooks(tx: QueryClient, brandId: string, days = 60): 
   );
   return rows.map((r) => r.hook).filter((h): h is string => !!h);
 }
+
+// ---------------------------------------------------------------------------
+// Media assets
+// ---------------------------------------------------------------------------
+export interface AssetRow {
+  id: string;
+  brandId: string;
+  kind: "logo" | "photo" | "graphic" | "video" | "document" | "font";
+  storageKey: string;
+  mime: string;
+  width: number | null;
+  height: number | null;
+  sha256: string | null;
+  bytes: number | null;
+  durationMs: number | null;
+  origin: "uploaded" | "rendered" | "generated";
+  createdAt: string;
+}
+
+const ASSET_COLS = "id, brand_id, kind, storage_key, mime, width, height, sha256, bytes, duration_ms, origin, created_at";
+const asset = (r: Record<string, unknown>): AssetRow => ({
+  id: r.id as string,
+  brandId: r.brand_id as string,
+  kind: r.kind as AssetRow["kind"],
+  storageKey: r.storage_key as string,
+  mime: r.mime as string,
+  width: r.width === null ? null : Number(r.width),
+  height: r.height === null ? null : Number(r.height),
+  sha256: (r.sha256 as string | null) ?? null,
+  bytes: r.bytes === null ? null : Number(r.bytes),
+  durationMs: r.duration_ms === null ? null : Number(r.duration_ms),
+  origin: r.origin as AssetRow["origin"],
+  createdAt: new Date(r.created_at as string).toISOString(),
+});
+
+export async function insertAsset(
+  tx: QueryClient,
+  a: { tenantId: string; brandId: string; kind: AssetRow["kind"]; storageKey: string; mime: string; width: number | null; height: number | null; sha256: string; bytes: number; durationMs: number | null; origin: AssetRow["origin"]; altText: string | null; createdBy: string | null },
+): Promise<string> {
+  const { rows } = await tx.query<{ id: string }>(
+    `INSERT INTO assets (tenant_id, brand_id, kind, storage_key, mime, width, height, sha256, bytes, duration_ms, origin, alt_text, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
+    [a.tenantId, a.brandId, a.kind, a.storageKey, a.mime, a.width, a.height, a.sha256, a.bytes, a.durationMs, a.origin, a.altText, a.createdBy],
+  );
+  return rows[0]!.id;
+}
+
+export async function getAsset(tx: QueryClient, id: string): Promise<AssetRow | null> {
+  const { rows } = await tx.query<Record<string, unknown>>(`SELECT ${ASSET_COLS} FROM assets WHERE id = $1`, [id]);
+  return rows[0] ? asset(rows[0]) : null;
+}

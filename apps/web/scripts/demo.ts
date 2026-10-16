@@ -13,6 +13,10 @@
  * any app password so the scheduling screens can be explored without an account.
  */
 import { createServer } from "node:http";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ChromiumGraphicRenderer, LocalMediaStore } from "@jat/media";
 import { randomBytes } from "node:crypto";
 import { HttpClaudeClient, runBrandExtraction, runPlanning, runPostDraft, runPostReview } from "@jat/ai";
 import { sampleClaude } from "../src/sample-ai.ts";
@@ -98,12 +102,18 @@ const offlineBluesky: ChannelAdapter<BlueskyCredential> = {
   },
 };
 const kek = new LocalKekProvider(randomBytes(32), "demo-kek");
+// Media: a throwaway local folder; graphics via Playwright's Chromium when it's installed.
+const mediaSecret = randomBytes(32);
+const mediaStore = new LocalMediaStore(mkdtempSync(join(tmpdir(), "jat-demo-media-")), { secret: mediaSecret, baseUrl: `http://localhost:${port}` });
+const pwModule = process.env.PLAYWRIGHT_MODULE ?? (existsSync("/opt/npm-tools/node_modules/playwright/index.mjs") ? "/opt/npm-tools/node_modules/playwright/index.mjs" : undefined);
+const renderer = new ChromiumGraphicRenderer(pwModule ? { module: pwModule } : {});
 const safeFetch = createSafeFetch();
 const publisher: PublisherDeps = {
   publisherDb: new PsqlDatabase(pg.conn, "publisher_user"),
   keks: kek,
   mode: "dry_run",
   activeKek: kek,
+  media: mediaStore,
   adapters: { bluesky: process.env.DEMO_FAKE_PUBLISH === "1" ? offlineBluesky : new BlueskyAdapter(safeFetch) },
   safeFetch,
   log: (m, e) => console.error(m, e ?? ""),
@@ -127,9 +137,12 @@ const handler = createApp({
     review: (r) => runPostReview({ client: claude, ledger }, r),
   },
   publishing: { mode: "dry_run", activeKek: kek, bluesky: publisher.adapters.bluesky!, oauth: {}, publisher },
+  media: { store: mediaStore, maxUploadBytes: 250 * 1024 * 1024, renderer, localSigningSecret: mediaSecret },
 });
 
-const server = createServer((req, res) => void handler(req, res)).listen(port, () => {
+const server = createServer((req, res) => void handler(req, res));
+server.requestTimeout = 30 * 60_000;
+server.listen(port, () => {
   console.log(`\nJAT Marketing OS demo: http://localhost:${port}`);
   console.log("Sign in as ops@jat.example (operator), owner@acme.example (owner) or editor@acme.example (editor).");
   console.log(process.env.ANTHROPIC_API_KEY ? "Using the real Claude API and real website crawl." : "No ANTHROPIC_API_KEY: AI steps use an offline sample model (canned, schema-valid output).");

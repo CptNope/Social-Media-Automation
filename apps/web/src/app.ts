@@ -49,6 +49,8 @@ import { runOnboarding, type OnboardingDeps } from "./onboarding.ts";
 import { registerContentRoutes } from "./content-routes.ts";
 import type { ContentAi } from "./content-jobs.ts";
 import { registerPublishingRoutes, type PublishingConfig } from "./publishing-routes.ts";
+import { registerMediaRoutes, type MediaConfig } from "./media-routes.ts";
+import { MultipartError, boundaryFrom, parseMultipart } from "./multipart.ts";
 import {
   RateLimiter,
   SECURITY_HEADERS,
@@ -80,6 +82,8 @@ export interface AppDeps {
   onboarding: Omit<OnboardingDeps, "db">;
   /** Planning, drafting and review agents; null when no API key is configured. */
   contentAi?: ContentAi | null;
+  /** Media storage, upload limits and the graphics renderer; null/absent → no media features. */
+  media?: MediaConfig | null;
   /** Publishing (credentials, publisher connection, adapters); null/absent → export only. */
   publishing?: PublishingConfig | null;
   /** Show the sign-in link on screen (development only; refused in production). */
@@ -91,6 +95,9 @@ export interface AppDeps {
 }
 
 const LOGIN_TTL_MINUTES = 15;
+/** Uploads stream to temp files; a few at a time per process keeps disk and memory bounded. */
+const MAX_CONCURRENT_UPLOADS = 4;
+const UPLOAD_PATH = /^\/w\/[0-9a-f-]{36}\/content\/[0-9a-f-]{36}\/media\/upload$/;
 
 // Who may do what. Approval rights come from the core approval policy, not from here.
 const ROLES = {
@@ -133,6 +140,7 @@ export function createApp(deps: AppDeps) {
   const cssPath = fileURLToPath(new URL("../public/app.css", import.meta.url));
   let cssCache: Buffer | null = null;
   const router = new Router();
+  let activeUploads = 0;
 
   // ------------------------------------------------------------------------- helpers
   const sessionOf = (req: Req): Session | null => verifySession(deps.sessionSecret, req.cookies[SESSION_COOKIE]);
@@ -466,7 +474,8 @@ export function createApp(deps: AppDeps) {
   });
 
   // ------------------------------------------------------------------------- planning & content
-  registerContentRoutes({ router, workspace, idParam, jobs: deps.jobs, content: { db, ai: deps.contentAi ?? null }, publishing: deps.publishing ? { mode: deps.publishing.mode } : null });
+  registerContentRoutes({ router, workspace, idParam, jobs: deps.jobs, content: { db, ai: deps.contentAi ?? null }, publishing: deps.publishing ? { mode: deps.publishing.mode } : null, media: deps.media ? { canGenerate: !!deps.media.renderer, maxUploadMb: Math.floor(deps.media.maxUploadBytes / 1024 / 1024) } : null });
+  registerMediaRoutes({ router, workspace, idParam, jobs: deps.jobs, db, media: deps.media ?? null, log });
   registerPublishingRoutes({ router, workspace, idParam, requireUserId: async (req) => (await requireSession(req)).userId, config: deps.publishing ?? null, secureCookies });
 
   // ------------------------------------------------------------------------- claims
@@ -546,6 +555,8 @@ export function createApp(deps: AppDeps) {
     const cookies = parseCookies(req.headers.cookie);
     const r: Req = { method, url, headers: req.headers, params: {}, cookies, ip: clientIp(req, deps.trustedProxies ?? 0), form: new URLSearchParams() };
     let out: Res;
+    let cleanupUpload: (() => Promise<void>) | null = null;
+    let uploadSlot = false;
     try {
       const m = router.match(method, url.pathname);
       if (m === null) throw new HttpError(404, "That page doesn't exist.");
@@ -553,7 +564,36 @@ export function createApp(deps: AppDeps) {
       r.params = m.params;
       if (method === "POST") {
         assertSameOrigin(r, base);
-        r.form = await readForm(req);
+        const boundary = boundaryFrom(req.headers["content-type"]);
+        if (boundary) {
+          // File uploads are accepted on the media upload route only, streamed to temp files with a size cap.
+          // Refusals still drain (a bounded amount of) the body, so the browser sees the error page.
+          if (!UPLOAD_PATH.test(url.pathname) || !deps.media) {
+            await drain(req, 1024 * 1024);
+            throw new HttpError(415, "Uploads aren't accepted here.");
+          }
+          if (!sessionOf(r)) {
+            await drain(req, 1024 * 1024);
+            throw new HttpError(401, "Sign in required");
+          }
+          if (activeUploads >= MAX_CONCURRENT_UPLOADS) {
+            await drain(req, 1024 * 1024);
+            throw new HttpError(503, "The server is busy with other uploads. Try again in a minute.");
+          }
+          activeUploads++;
+          uploadSlot = true;
+          const maxUpload = deps.media.maxUploadBytes;
+          const parsed = await parseMultipart(req, boundary, { maxFileBytes: maxUpload }).catch(async (e: unknown) => {
+            if (e instanceof MultipartError) {
+              await drain(req, maxUpload);
+              throw new HttpError(e.status, e.message);
+            }
+            throw e;
+          });
+          cleanupUpload = parsed.cleanup;
+          r.form = parsed.fields;
+          r.files = parsed.files;
+        } else r.form = await readForm(req);
         // Every POST except sign-in requires a session-bound CSRF token.
         if (url.pathname !== "/login" && url.pathname !== "/login/verify") {
           const s = sessionOf(r);
@@ -571,12 +611,36 @@ export function createApp(deps: AppDeps) {
         out = htmlResponse(V.errorPage(500, "The server hit an unexpected error. It has been logged."), 500);
       }
     }
+    if (uploadSlot) activeUploads--;
+    if (cleanupUpload) await cleanupUpload().catch((e: unknown) => log("[upload] temp cleanup failed", e));
     const headers: Record<string, string> = { ...SECURITY_HEADERS };
     if (secureCookies) headers["strict-transport-security"] = "max-age=31536000; includeSubDomains";
     if (!url.pathname.startsWith("/static/")) headers["cache-control"] = "no-store";
     send(res, method === "HEAD" ? { ...out, body: "" } : out, headers);
     if (process.env.JAT_ACCESS_LOG === "1") console.log(`${method} ${url.pathname} ${out.status} ${Date.now() - started}ms`);
   };
+}
+
+/** Read and discard up to `max` more bytes of a request body; beyond that, close the connection. */
+function drain(req: IncomingMessage, max: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (req.readableEnded || req.destroyed) return resolve();
+    let seen = 0;
+    const done = () => {
+      req.off("data", onData);
+      resolve();
+    };
+    const onData = (c: Buffer) => {
+      seen += c.length;
+      if (seen > max) {
+        req.off("data", onData);
+        req.socket.destroySoon?.();
+        resolve();
+      }
+    };
+    req.on("data", onData).once("end", done).once("error", done).once("close", done);
+    req.resume();
+  });
 }
 
 /** YYYY-MM-DD that exists on the calendar (rejects 2026-02-31, which Date.parse rolls over). */

@@ -62,7 +62,7 @@ export interface PublishingKit {
 const MANAGE: MemberRole[] = ["agency_operator", "client_owner"];
 const TZ = DEFAULT_TIMEZONE;
 /** Channels connected by OAuth sign-in. */
-export const OAUTH_CHANNELS = ["facebook", "linkedin", "google_business_profile", "threads", "x"] as const;
+export const OAUTH_CHANNELS = ["facebook", "instagram", "linkedin", "google_business_profile", "threads", "x", "pinterest", "tiktok", "youtube"] as const;
 export type OAuthChannel = (typeof OAUTH_CHANNELS)[number];
 const isOAuthChannel = (c: string): c is OAuthChannel => (OAUTH_CHANNELS as readonly string[]).includes(c);
 /** One state cookie per channel, so sign-ins to two platforms in parallel don't clash. */

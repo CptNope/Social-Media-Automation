@@ -2,12 +2,14 @@ import { createServer } from "node:http";
 import { HttpClaudeClient, runBrandExtraction, runPlanning, runPostDraft, runPostReview } from "@jat/ai";
 import { DbSpendLedger, type Database } from "@jat/db";
 import { crawlSite, createSafeFetch } from "@jat/ingest";
-import { BlueskyAdapter, FacebookPagesAdapter, GoogleBusinessAdapter, LINKEDIN_DEFAULT_VERSION, LinkedInAdapter, ThreadsAdapter, XAdapter } from "@jat/integrations";
+import { BlueskyAdapter, FacebookPagesAdapter, GoogleBusinessAdapter, InstagramAdapter, LINKEDIN_DEFAULT_VERSION, LinkedInAdapter, PinterestAdapter, ThreadsAdapter, TikTokAdapter, XAdapter, YouTubeAdapter } from "@jat/integrations";
+import { ChromiumGraphicRenderer, LocalMediaStore, R2MediaStore } from "@jat/media";
 import { LocalKekProvider } from "@jat/vault";
 import { createApp, type Mailer } from "./app.ts";
 import { InProcessJobs } from "./jobs.ts";
 import { createPgDatabase } from "./pg-database.ts";
 import type { PublishingConfig } from "./publishing-routes.ts";
+import type { MediaConfig } from "./media-routes.ts";
 import { startDispatcher, type PublisherDeps } from "./publisher.ts";
 
 /**
@@ -29,7 +31,14 @@ import { startDispatcher, type PublisherDeps } from "./publisher.ts";
  *   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET   (Google Business Profile)
  *   THREADS_APP_ID, THREADS_APP_SECRET, THREADS_GRAPH_HOST (default graph.threads.net)
  *   X_CLIENT_ID, X_CLIENT_SECRET
+ *   PINTEREST_CLIENT_ID, PINTEREST_CLIENT_SECRET, PINTEREST_API_HOST (api-sandbox.pinterest.com for Trial access)
+ *   TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET   (Instagram uses the Facebook app; YouTube the Google client)
  *   Each platform's OAuth redirect URI is {BASE_URL}/oauth/{channel}/callback
+ *
+ * Media (optional):
+ *   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_JURISDICTION   Cloudflare R2
+ *   LOCAL_MEDIA_DIR + MEDIA_SIGNING_SECRET   local folder (development only)
+ *   MAX_UPLOAD_MB (default 250), GRAPHICS_RENDERER=chromium (needs Playwright + Chromium)
  *   PUBLISHER_INTERVAL_SECONDS  dispatcher interval, default 30
  *   JAT_PROCESS             all (default) | web | worker — see below
  */
@@ -72,6 +81,29 @@ const processRole = (env.JAT_PROCESS ?? "all") as "all" | "web" | "worker";
 if (!["all", "web", "worker"].includes(processRole)) throw new Error("JAT_PROCESS must be all, web or worker");
 if (production && !env.JAT_PROCESS) throw new Error("Set JAT_PROCESS=web and JAT_PROCESS=worker in production (\"all\" lets the web process read credentials)");
 
+/**
+ * Media files: Cloudflare R2 when R2_* is set, otherwise a local folder (development).
+ * Graphics need Chromium through Playwright (GRAPHICS_RENDERER=chromium).
+ */
+function media(): MediaConfig | null {
+  const mb = Number(env.MAX_UPLOAD_MB ?? 250);
+  if (!Number.isFinite(mb) || mb <= 0 || mb > 4096) throw new Error("MAX_UPLOAD_MB must be a number between 1 and 4096");
+  const maxUploadBytes = mb * 1024 * 1024;
+  const renderer = env.GRAPHICS_RENDERER === "chromium" ? new ChromiumGraphicRenderer() : null;
+  if (env.R2_ACCOUNT_ID) {
+    const store = new R2MediaStore({ accountId: env.R2_ACCOUNT_ID, bucket: required("R2_BUCKET"), accessKeyId: required("R2_ACCESS_KEY_ID"), secretAccessKey: required("R2_SECRET_ACCESS_KEY"), ...(env.R2_JURISDICTION ? { jurisdiction: env.R2_JURISDICTION } : {}) });
+    return { store, maxUploadBytes, renderer };
+  }
+  if (env.LOCAL_MEDIA_DIR) {
+    if (production) throw new Error("LOCAL_MEDIA_DIR is for development; configure Cloudflare R2 (R2_*) in production");
+    const secret = Buffer.from(required("MEDIA_SIGNING_SECRET"), "base64");
+    if (secret.length < 32) throw new Error("MEDIA_SIGNING_SECRET must be at least 32 bytes (base64)");
+    return { store: new LocalMediaStore(env.LOCAL_MEDIA_DIR, { secret, baseUrl: required("BASE_URL") }), maxUploadBytes, renderer, localSigningSecret: secret };
+  }
+  return null;
+}
+const mediaConfig = media();
+
 async function publishing(): Promise<PublishingConfig | null> {
   const devPsql = env.DEV_PSQL === "1" && development;
   // Export-only unless a credential KEK is set and the publisher can run (here, or in a separate worker).
@@ -89,13 +121,18 @@ async function publishing(): Promise<PublishingConfig | null> {
   const google = env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? new GoogleBusinessAdapter({ clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, redirectUri: callback("google_business_profile") }) : undefined;
   const threads = env.THREADS_APP_ID && env.THREADS_APP_SECRET ? new ThreadsAdapter({ appId: env.THREADS_APP_ID, appSecret: env.THREADS_APP_SECRET, redirectUri: callback("threads"), ...(env.THREADS_GRAPH_HOST ? { graphHost: env.THREADS_GRAPH_HOST } : {}) }) : undefined;
   const x = env.X_CLIENT_ID && env.X_CLIENT_SECRET ? new XAdapter({ clientId: env.X_CLIENT_ID, clientSecret: env.X_CLIENT_SECRET, redirectUri: callback("x") }) : undefined;
-  const oauth = { ...(facebook ? { facebook } : {}), ...(linkedin ? { linkedin } : {}), ...(google ? { google_business_profile: google } : {}), ...(threads ? { threads } : {}), ...(x ? { x } : {}) };
+  const fbApp = env.FACEBOOK_APP_ID && env.FACEBOOK_APP_SECRET ? { appId: env.FACEBOOK_APP_ID, appSecret: env.FACEBOOK_APP_SECRET, version: env.FACEBOOK_GRAPH_VERSION ?? "v26.0" } : null;
+  const instagram = fbApp ? new InstagramAdapter({ ...fbApp, redirectUri: callback("instagram") }) : undefined;
+  const pinterest = env.PINTEREST_CLIENT_ID && env.PINTEREST_CLIENT_SECRET ? new PinterestAdapter({ clientId: env.PINTEREST_CLIENT_ID, clientSecret: env.PINTEREST_CLIENT_SECRET, redirectUri: callback("pinterest"), ...(env.PINTEREST_API_HOST ? { apiHost: env.PINTEREST_API_HOST } : {}) }) : undefined;
+  const tiktok = env.TIKTOK_CLIENT_KEY && env.TIKTOK_CLIENT_SECRET ? new TikTokAdapter({ clientKey: env.TIKTOK_CLIENT_KEY, clientSecret: env.TIKTOK_CLIENT_SECRET, redirectUri: callback("tiktok") }) : undefined;
+  const youtube = env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? new YouTubeAdapter({ clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, redirectUri: callback("youtube") }) : undefined;
+  const oauth = { ...(instagram ? { instagram } : {}), ...(pinterest ? { pinterest } : {}), ...(tiktok ? { tiktok } : {}), ...(youtube ? { youtube } : {}), ...(facebook ? { facebook } : {}), ...(linkedin ? { linkedin } : {}), ...(google ? { google_business_profile: google } : {}), ...(threads ? { threads } : {}), ...(x ? { x } : {}) };
   let publisher: PublisherDeps | null = null;
   if (processRole !== "web") {
     const publisherDb: Database = devPsql
       ? new (await import("@jat/db/testing/psql-client")).PsqlDatabase({ bin: required("PG_BIN"), host: required("PGHOST"), port: env.PGPORT ?? "5432", user: env.PGUSER ?? "postgres", database: env.PGDATABASE ?? "postgres" }, "publisher_user")
       : await createPgDatabase(required("PUBLISHER_DATABASE_URL"));
-    publisher = { publisherDb, keks: kek, activeKek: kek, mode, adapters: { bluesky, ...oauth }, safeFetch, log: (m, e) => console.error(m, e ?? "") };
+    publisher = { publisherDb, keks: kek, activeKek: kek, mode, adapters: { bluesky, ...oauth }, media: mediaConfig?.store ?? null, safeFetch, log: (m, e) => console.error(m, e ?? "") };
   }
   return { mode, activeKek: kek, bluesky, oauth, publisher };
 }
@@ -133,8 +170,13 @@ if (processRole !== "worker") {
         }
       : null,
     publishing: publishingConfig,
+    media: mediaConfig,
   });
 
   const port = Number(env.PORT ?? 3000);
-  createServer((req, res) => void handler(req, res)).listen(port, () => console.log(`JAT Marketing OS listening on ${env.BASE_URL} (port ${port})`));
+  const server = createServer((req, res) => void handler(req, res));
+  // Large video uploads on slow connections need longer than Node's 5-minute default.
+  // (Headers still have to arrive within headersTimeout, which limits slow-header attacks.)
+  server.requestTimeout = 30 * 60_000;
+  server.listen(port, () => console.log(`JAT Marketing OS listening on ${env.BASE_URL} (port ${port})`));
 }
